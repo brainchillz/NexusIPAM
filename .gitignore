@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+venv/
+devdata/
+*.log
+auth.json
+ipam.db*
+certs/
+backups/
+.pytest_cache/
+nohup.out
+# Local deployment notes, credentials pointers and planning — real values
+# belong in your private infra repo; nothing under here is ever committed
+private/

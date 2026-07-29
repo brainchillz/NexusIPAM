@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus IPAM</title>
+<meta name="theme-color" content="#1c1e22">
+<link rel="stylesheet" href="/static/css/style.css">
+<script>try { if (localStorage.getItem('theme') === 'light') document.documentElement.classList.add('theme-light'); } catch (e) {}</script>
+</head>
+<body>
+<div id="login-screen" style="display:none">
+  <form class="login-box" onsubmit="doLogin(event)">
+    <h1>Nexus IPAM</h1>
+    <p class="subtitle">IP address management &middot; sign in to continue</p>
+    <div class="form-group"><label>Username</label><input id="login-user" class="form-control" autocomplete="username"></div>
+    <div class="form-group"><label>Password</label><input id="login-pass" type="password" class="form-control" autocomplete="current-password"></div>
+    <div id="login-error" class="error" style="display:none"></div>
+    <button class="btn" type="submit">Sign In</button>
+  </form>
+</div>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1 id="sidebar-title">Nexus IPAM</h1>
+    <p class="subtitle">IP address management</p>
+  </div>
+  <ul class="nav-list">
+    <li><a href="#" data-page="overview" class="active"><span class="icon">&#9733;</span> Overview</a></li>
+
+    <li class="nav-group" data-group="addressing">
+      <div class="nav-cat" onclick="toggleNavGroup(this)">Addressing <span class="caret">&#9662;</span></div>
+      <ul class="nav-sub">
+        <li><a href="#" data-page="networks"><span class="icon">&#9783;</span> Networks</a></li>
+        <li><a href="#" data-page="addresses"><span class="icon">&#128205;</span> IP Addresses</a></li>
+        <li><a href="#" data-page="vlans"><span class="icon">&#127991;</span> VLANs</a></li>
+      </ul>
+    </li>
+
+    <li class="nav-group" data-group="inventory">
+      <div class="nav-cat" onclick="toggleNavGroup(this)">Inventory <span class="caret">&#9662;</span></div>
+      <ul class="nav-sub">
+        <li><a href="#" data-page="devices"><span class="icon">&#128421;</span> Devices</a></li>
+        <li><a href="#" data-page="clusters"><span class="icon">&#9783;</span> Clusters</a></li>
+        <li><a href="#" data-page="vms"><span class="icon">&#128190;</span> Virtual Machines</a></li>
+        <li><a href="#" data-page="containers"><span class="icon">&#128230;</span> Containers</a></li>
+        <li><a href="#" data-page="topology"><span class="icon">&#127760;</span> Topology</a></li>
+      </ul>
+    </li>
+
+    <li class="nav-group" data-group="services">
+      <div class="nav-cat" onclick="toggleNavGroup(this)">Services <span class="caret">&#9662;</span></div>
+      <ul class="nav-sub">
+        <li><a href="#" data-page="dhcp"><span class="icon">&#128268;</span> DHCP</a></li>
+        <li><a href="#" data-page="dns"><span class="icon">&#127760;</span> DNS</a></li>
+      </ul>
+    </li>
+
+    <li><a href="#" data-page="scan"><span class="icon">&#128225;</span> Scan &amp; Verify</a></li>
+    <li class="nav-admin-only"><a href="#" data-page="settings"><span class="icon">&#9881;</span> Settings</a></li>
+  </ul>
+  <div class="sidebar-footer">
+    <div class="footer-account">
+      <span id="account-user"></span>
+      <a href="#" onclick="changePassword(event)">Password</a>
+      <a href="#" onclick="doLogout(event)">Sign out</a>
+      <a href="#" onclick="toggleTheme(event)"><span id="theme-label">Light theme</span></a>
+    </div>
+  </div>
+</nav>
+<main class="content">
+  <div id="page-content"></div>
+</main>
+
+<div id="modal-overlay" class="modal-overlay" style="display:none">
+  <div class="modal" id="modal-content">
+    <div class="modal-header">
+      <h3 id="modal-title"></h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/static/js/core.js"></script>
+<script src="/static/js/overview.js"></script>
+<script src="/static/js/networks.js"></script>
+<script src="/static/js/addresses.js"></script>
+<script src="/static/js/vlans.js"></script>
+<script src="/static/js/inventory.js"></script>
+<script src="/static/js/services.js"></script>
+<script src="/static/js/scan.js"></script>
+<script src="/static/js/settings.js"></script>
+</body>
+</html>

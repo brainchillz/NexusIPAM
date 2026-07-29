@@ -1,0 +1,38 @@
+# Nexus IPAM — IP address management for a home lab.
+#
+# DEFAULT: bridge networking with a published port. Unlike DNSMAQ-MGR this app
+# serves no DHCP and needs no L2 broadcasts, so bridge mode is fully
+# functional for the web UI and the API.
+#
+# The one caveat is the ping sweeper: from a bridge network it probes through
+# Docker's NAT, so it can only see hosts that are routable from the container.
+# To scan your LAN directly, switch to host networking (commented out below).
+services:
+  nexus-ipam:
+    build: .
+    image: nexus-ipam
+    container_name: nexus-ipam
+    restart: unless-stopped
+    ports:
+      - "8444:8444"             # web UI + API (HTTPS)
+    volumes:
+      - nexus-ipam-data:/data
+    # environment:
+    #   NEXUSIPAM_PORT: "8444"          # web UI port
+    #   NEXUSIPAM_TLS: "1"              # 0 = plain HTTP behind a reverse proxy
+    #   NEXUSIPAM_ADMIN_PASSWORD: ""    # set to skip the generated first-run password
+    #   NEXUSIPAM_SCAN_WORKERS: "64"    # ping concurrency
+    #   NEXUSIPAM_SCAN_MAX_HOSTS: "4096"
+
+  # ── Host-networking variant (ping sweeps see the real LAN) ─────────
+  # nexus-ipam:
+  #   build: .
+  #   image: nexus-ipam
+  #   container_name: nexus-ipam
+  #   network_mode: host
+  #   restart: unless-stopped
+  #   volumes:
+  #     - nexus-ipam-data:/data
+
+volumes:
+  nexus-ipam-data:

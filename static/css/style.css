@@ -1,0 +1,550 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+/* Nexus identity: dark grey base, lighter grey surfaces/text, burnt orange
+   headers/accents/borders. Panel & header borders carry the orange; row
+   separators use --border-soft so tables stay readable. Status colors
+   (green/yellow/red) stay semantic. */
+:root {
+  --bg: #1c1e22;
+  --sidebar-bg: #24262b;
+  --card-bg: #2a2d33;
+  --border: #7a4a22;
+  --border-soft: #3a3d43;
+  --text: #d6d8dc;
+  --text-muted: #9aa0a8;
+  --primary: #c1550f;
+  --primary-hover: #d96a1e;
+  --green: #22c55e;
+  --yellow: #eab308;
+  --red: #ef4444;
+  --radius: 8px;
+}
+/* Light theme — opt-in via html.theme-light (set from localStorage before paint,
+   toggled in the sidebar footer). Only the palette changes; layout is shared. */
+html.theme-light {
+  --bg: #f2f1ef;
+  --sidebar-bg: #ffffff;
+  --card-bg: #ffffff;
+  --border: #c98a5b;
+  --border-soft: #ddd8d2;
+  --text: #26221e;
+  --text-muted: #6b655e;
+  --primary: #b34d0c;
+  --primary-hover: #983f08;
+  --green: #16a34a;
+  --yellow: #ca8a04;
+  --red: #dc2626;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  min-height: 100vh;
+}
+a { color: var(--primary); text-decoration: none; }
+
+/* ─── Sidebar ─────────────────────────── */
+.sidebar {
+  width: 240px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-header { padding: 24px 20px 16px; border-bottom: 1px solid var(--border); }
+.sidebar-header h1 { font-size: 18px; font-weight: 700; }
+.subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.nav-list { list-style: none; padding: 8px 0; flex: 1; }
+.nav-list li { margin: 1px 0; }
+.nav-list a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+  transition: all 0.15s;
+  border-left: 3px solid transparent;
+}
+.nav-list a:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.nav-list a.active { color: var(--primary); background: rgba(193,85,15,0.12); border-left-color: var(--primary); }
+.nav-list .icon { font-size: 16px; width: 20px; text-align: center; }
+
+/* Read-only role: hide create toolbars, destructive buttons, and admin-only nav
+   items (server also enforces 403). */
+body.readonly .toolbar,
+body.readonly .btn-danger,
+body.readonly .nav-admin-only { display: none !important; }
+
+/* Modules disabled on the Modules page are hidden from the left nav. A nav
+   group whose items are all hidden collapses away entirely. */
+.nav-list li.module-hidden { display: none !important; }
+.nav-list li.nav-group.group-hidden { display: none !important; }
+
+/* Checkbox multi-select list (disk/PV/backstore pickers) */
+.checklist {
+  max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--border-soft); border-radius: 6px;
+  background: rgba(0,0,0,0.18); padding: 4px;
+}
+.checkitem {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 9px; border-radius: 4px; cursor: pointer;
+  font-size: 14px; user-select: none;
+}
+.checkitem:hover { background: rgba(255,255,255,0.05); }
+.checkitem input { margin: 0; width: 16px; height: 16px; flex-shrink: 0; }
+
+/* Toggle switch (used on the Modules page) */
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; vertical-align: middle; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--border); border-radius: 24px; transition: background 0.15s;
+}
+.switch .slider::before {
+  content: ''; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px;
+  background: #fff; border-radius: 50%; transition: transform 0.15s;
+}
+.switch input:checked + .slider { background: var(--green); }
+.switch input:checked + .slider::before { transform: translateX(18px); }
+.switch input:focus-visible + .slider { box-shadow: 0 0 0 2px var(--primary); }
+
+/* Collapsible nav categories */
+.nav-cat {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 20px 4px; margin-top: 4px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--text-muted); cursor: pointer; user-select: none;
+}
+.nav-cat:hover { color: var(--text); }
+.nav-cat .caret { font-size: 10px; transition: transform 0.15s; }
+.nav-sub { list-style: none; }
+.nav-sub a { padding-left: 28px; }
+.nav-group.collapsed .nav-sub { display: none; }
+.nav-group.collapsed .nav-cat .caret { transform: rotate(-90deg); }
+.sidebar-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.status-dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+/* ─── Content ─────────────────────────── */
+.content { flex: 1; padding: 32px 40px; overflow-y: auto; max-height: 100vh; }
+.content h2 { font-size: 24px; font-weight: 700; margin-bottom: 20px; color: var(--primary); }
+.content h3 { font-size: 18px; font-weight: 600; margin: 24px 0 12px; color: var(--primary); }
+.content h4 { font-size: 15px; font-weight: 600; margin: 12px 0 8px; }
+
+/* ─── Cards ───────────────────────────── */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  text-align: center;
+}
+.card-value { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+.card-label { font-size: 13px; color: var(--text-muted); }
+.info-row {
+  display: flex; gap: 24px; padding: 12px 16px;
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 14px; margin-bottom: 20px;
+}
+
+/* ─── Tables ──────────────────────────── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.table thead th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+.table tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+/* ─── Buttons ─────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--primary-hover); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-outline:hover { background: rgba(255,255,255,0.05); }
+.btn-danger { background: var(--red); }
+.btn-danger:hover { background: #dc2626; }
+.btn-warning { background: var(--yellow); color: #000; }
+.btn-warning:hover { background: #d97706; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+
+/* ─── Status Badges ───────────────────── */
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.status-badge.green { background: rgba(34,197,94,0.2); color: var(--green); }
+.status-badge.yellow { background: rgba(234,179,8,0.2); color: var(--yellow); }
+.status-badge.red { background: rgba(239,68,68,0.2); color: var(--red); }
+.status-badge.gray { background: rgba(139,149,165,0.2); color: var(--text-muted); }
+
+/* ─── Pool Cards ──────────────────────── */
+.pool-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.pool-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.pool-name { font-size: 18px; }
+.pool-stats { color: var(--text-muted); font-size: 13px; margin-right: auto; }
+.pool-status { font-size: 13px; color: var(--text-muted); margin-top: 8px; }
+.pool-scan { font-size: 13px; color: var(--text-muted); }
+.zfs-vdev { font-family: 'Courier New', monospace; font-size: 12px; color: var(--text-muted); padding: 2px 0 2px 16px; }
+
+/* ─── Form ────────────────────────────── */
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: var(--text-muted); }
+.form-control {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+}
+.form-control:focus { outline: none; border-color: var(--primary); }
+select.form-control { cursor: pointer; }
+select.form-control[multiple] { min-height: 120px; }
+.help { font-size: 12px; color: var(--text-muted); margin: 4px 0 12px; }
+
+/* ─── Modal ───────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  /* Clip to the rounded box so wide content can never spill out and push a
+     page-level horizontal scrollbar — any overflow is contained in the body. */
+  overflow: hidden;
+}
+/* Wide variant for device/dataset/property tables (ZFS / iSCSI / MD "Manage"). */
+.modal.wide { max-width: 1080px; width: 95%; }
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h3 { font-size: 16px; margin: 0; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.modal-close:hover { color: var(--text); }
+/* Vertical scroll is fine; keep any horizontal scroll (very wide tables)
+   inside the body rather than on the whole page. */
+.modal-body { padding: 20px; overflow-y: auto; overflow-x: auto; }
+
+/* ─── Raw Output ──────────────────────── */
+.raw-output {
+  background: #0a0e14;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: #c9d1d9;
+}
+
+/* ─── Alerts ──────────────────────────── */
+.alert { padding: 12px 16px; border-radius: 6px; font-size: 14px; margin-bottom: 16px; }
+.alert-warning { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.3); color: var(--yellow); }
+.alert-info { background: rgba(193,85,15,0.12); border: 1px solid rgba(193,85,15,0.35); color: var(--primary); }
+
+/* ─── Misc ────────────────────────────── */
+.loading { padding: 40px; text-align: center; color: var(--text-muted); }
+
+/* ─── Login ───────────────────────────── */
+#login-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  z-index: 2000;
+}
+.login-box {
+  width: 320px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 32px;
+}
+.login-box h1 { font-size: 20px; font-weight: 700; }
+.login-box .subtitle { margin: 4px 0 20px; }
+.login-box .btn { width: 100%; margin-top: 8px; justify-content: center; }
+.login-box .error { margin-bottom: 12px; }
+
+/* ─── Dashboard cards ─────────────────── */
+.card-head { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
+.card-link { cursor: pointer; transition: border-color 0.15s, transform 0.05s; }
+.card-link:hover { border-color: var(--primary); }
+.card-link:active { transform: translateY(1px); }
+.card-unit { font-size: 13px; color: var(--text-muted); font-weight: 400; }
+.card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.health-ok {
+  padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 14px;
+  background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: var(--green);
+}
+
+/* ─── Usage bars ──────────────────────── */
+.usage-bar {
+  position: relative;
+  height: 18px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.usage-bar-fill { height: 100%; transition: width 0.3s ease; }
+.usage-bar-fill.green { background: var(--green); }
+.usage-bar-fill.yellow { background: var(--yellow); }
+.usage-bar-fill.red { background: var(--red); }
+.usage-bar-label {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  text-align: center;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text);
+  text-shadow: 0 0 2px rgba(0,0,0,0.6);
+}
+.pool-errors { color: var(--red); margin: 4px 0; font-size: 13px; }
+
+textarea.form-control {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+/* ─── Sidebar footer account ──────────── */
+.footer-status { display: flex; align-items: center; }
+.footer-account { margin-top: 10px; font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.footer-account a { font-size: 12px; }
+.error { padding: 20px; background: rgba(239,68,68,0.1); border: 1px solid var(--red); border-radius: 6px; }
+.log-view {
+  background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; margin-top: 12px; max-height: 65vh; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.spark { display: block; margin: 4px auto 0; opacity: 0.85; max-width: 100%; }
+.spark svg { display: block; }
+.pool-stats .fc-up { color: var(--red); }
+.pool-stats .fc-flat { color: var(--text-muted); }
+
+
+/* ─── Containers pages (ported from LXD-Console) ───────────── */
+.console-term { width: 100%; height: 60vh; background: #000; padding: 4px; }
+.badge-type { font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  background: var(--border-soft); margin-left: 4px; }
+.img-filter { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.img-filter .form-group { margin: 0; }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; margin: 16px 0 8px; }
+.card .big { font-size: 28px; font-weight: 700; margin: 6px 0 2px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 12px; }
+.page-header h2, .page-header h3 { margin: 0; }
+.btn-success { background: var(--green); color: #fff; }
+.alert-danger { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: var(--red); }
+
+/* ─── IPAM additions ───────────────────────────────────────
+   Everything above is shared verbatim with DNSMAQ-MGR so the two apps are
+   visually identical. Only the pieces below are specific to an address plan:
+   the IP map grid, the network tree, and the state colour key. */
+
+/* Address state colours. Semantic, and reused by the map, the legend and the
+   badges so one state always reads the same way. */
+:root {
+  --st-free: #3a3d43;
+  --st-active: #22c55e;
+  --st-reserved: #eab308;
+  --st-pool: #38bdf8;
+  --st-deprecated: #6b7280;
+  --st-unmanaged: #ef4444;
+}
+html.theme-light {
+  --st-free: #ddd8d2;
+  --st-active: #16a34a;
+  --st-reserved: #ca8a04;
+  --st-pool: #0284c7;
+  --st-deprecated: #9ca3af;
+  --st-unmanaged: #dc2626;
+}
+
+/* ─── IP map ──────────────────────────────────────────────
+   One cell per address. auto-fill keeps a /24 readable on a laptop and a /22
+   readable on a wide monitor without a media query. */
+.ip-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
+  gap: 3px;
+  margin: 12px 0 4px;
+}
+.ip-cell {
+  position: relative;
+  padding: 5px 2px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  cursor: pointer;
+  border: 1px solid transparent;
+  color: var(--text);
+  background: var(--st-free);
+  transition: transform 0.05s, border-color 0.15s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ip-cell:hover { border-color: var(--primary); transform: translateY(-1px); }
+.ip-cell.active { background: var(--st-active); color: #06240f; }
+.ip-cell.reserved { background: var(--st-reserved); color: #2b2100; }
+.ip-cell.dhcp, .ip-cell.pool { background: var(--st-pool); color: #052436; }
+.ip-cell.deprecated { background: var(--st-deprecated); color: #111; }
+.ip-cell.unmanaged { background: var(--st-unmanaged); color: #fff; }
+.ip-cell.gw::after {
+  content: '\2691';                 /* flag — marks the declared gateway */
+  position: absolute; top: 0; right: 2px; font-size: 9px; opacity: 0.9;
+}
+.ip-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-muted); margin: 8px 0 16px; }
+.ip-legend span { display: flex; align-items: center; gap: 5px; }
+.ip-legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+/* ─── Network tree ────────────────────────────────────────
+   Depth is rendered with padding on the first cell so the table stays a
+   plain table (sortable, copyable) instead of nested markup. */
+.tree-indent { display: inline-block; }
+.tree-branch { color: var(--text-muted); margin-right: 4px; }
+.cidr { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+.util-cell { min-width: 150px; }
+.util-cell .usage-bar { margin: 0; }
+
+/* Compact bar for table rows */
+.usage-bar.sm { height: 14px; }
+.usage-bar.sm .usage-bar-label { line-height: 14px; font-size: 10px; }
+
+/* ─── Detail layout ───────────────────────────────────────*/
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px 24px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+.detail-grid dt { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+.detail-grid dd { margin: 0 0 4px; word-break: break-word; }
+
+.crumb { font-size: 13px; color: var(--text-muted); margin-bottom: 10px; }
+.crumb a { cursor: pointer; }
+.crumb .sep { margin: 0 6px; opacity: 0.6; }
+
+/* ─── Topology tree ───────────────────────────────────────*/
+.topo { list-style: none; margin: 0; padding-left: 0; }
+.topo ul { list-style: none; padding-left: 22px; border-left: 1px solid var(--border-soft); margin-left: 8px; }
+.topo li { padding: 3px 0; font-size: 14px; }
+.topo .node { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topo .node a { cursor: pointer; }
+.topo .meta { font-size: 12px; color: var(--text-muted); }
+
+/* ─── Filter bar ──────────────────────────────────────────*/
+.filters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+.filters .form-group { margin: 0; min-width: 150px; }
+.filters .form-control { min-width: 150px; }
+.filters .grow { flex: 1; min-width: 220px; }
+
+/* ─── Global search results ───────────────────────────────*/
+.search-hit { padding: 8px 12px; border-bottom: 1px solid var(--border-soft); cursor: pointer; font-size: 14px; }
+.search-hit:hover { background: rgba(255,255,255,0.04); }
+.search-hit .kind { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; margin-right: 8px; }
+
+/* Right-aligned numeric columns read much faster in a utilization table. */
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.row-actions { text-align: right; white-space: nowrap; }
+.row-actions .btn { margin-left: 4px; }
+.muted { color: var(--text-muted); }
+.nowrap { white-space: nowrap; }
