@@ -18,6 +18,20 @@ the tools to check it against **what is actually true** on the wire:
 
 ---
 
+## Screenshots
+
+Seeded demo data; dark theme (a light theme is one click away).
+
+![Overview](docs/screenshots/overview.png)
+
+| | |
+|---|---|
+| ![Networks](docs/screenshots/networks.png) | ![Network detail with the IP map](docs/screenshots/network-detail.png) |
+| ![IP addresses](docs/screenshots/addresses.png) | ![Devices](docs/screenshots/devices.png) |
+| ![Topology](docs/screenshots/topology.png) | ![Scan and reconcile](docs/screenshots/scan.png) |
+
+---
+
 ## Storage: SQLite, not a database server
 
 The brief asked to avoid a database engine if reasonable. SQLite is the right

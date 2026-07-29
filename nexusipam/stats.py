@@ -47,8 +47,13 @@ def overview():
     for n in nets:
         u = utilization(n)
         n['utilization'] = u
-        total_cap += u['capacity']
-        total_used += u['used']
+        # Same rule as the busiest list below: a /8 or an IPv6 /64 has
+        # astronomical capacity that pins the global percent-used at 0.0
+        # forever. The totals only count prefixes small enough for "percent
+        # consumed" to mean anything.
+        if u['capacity'] <= 65536:
+            total_cap += u['capacity']
+            total_used += u['used']
         busiest.append(n)
     # Only prefixes small enough to be meaningful — a /8 container skews any
     # "percent used" reading into uselessness.

@@ -388,6 +388,11 @@ def topology():
     containers = db.rows(CONTAINER_SQL + ' ORDER BY containers.name')
 
     def attach(obj, kind):
+        if kind == 'cluster':
+            # A cluster's own `kind` column is its platform (proxmox, storage,
+            # …); stash it before the node type overwrites the key, or the UI
+            # badge degenerates to "cluster cluster".
+            obj['platform'] = obj.get('kind', '')
         obj['kind'] = kind
         obj['children'] = []
         return obj
