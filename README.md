@@ -156,6 +156,18 @@ Ping sweeps from a bridge network only reach what is routable from the
 container — to scan your LAN directly, switch to the `network_mode: host`
 variant commented into `docker-compose.yml`.
 
+Prebuilt images are published to GHCR by CI (`latest` from main, semver tags
+from releases), so building from source is optional:
+
+```bash
+docker run -d --name nexus-ipam -p 8444:8444 \
+  -v nexus-ipam-data:/data ghcr.io/brainchillz/nexusipam:latest
+docker logs nexus-ipam | grep -A3 'initial admin'
+```
+
+Set `NEXUSIPAM_ADMIN_PASSWORD` to skip the generated first-run password; the
+UI forces a change on first login otherwise.
+
 ### Bare metal (Debian/Ubuntu)
 
 ```bash
