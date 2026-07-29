@@ -29,6 +29,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, session, g
 from werkzeug.security import generate_password_hash, check_password_hash
 
+from . import db
 from .config import DATA_DIR, APP_VERSION, write_json_atomic
 from .runcmd import err
 
@@ -224,7 +225,8 @@ def api_login():
         session.permanent = True
         return jsonify({'success': True, 'user': username, 'role': _user_role(rec),
                         'must_change': bool(isinstance(rec, dict) and rec.get('must_change')),
-                        'fqdn': socket.getfqdn()})
+                        'fqdn': socket.getfqdn(),
+                        'banner': db.get_setting('banner')})
 
     check_password_hash(_DUMMY_HASH, password)  # equalize timing for unknown users
     _LOGIN_FAILS[ip] = (cnt + 1, first or now)
@@ -248,12 +250,31 @@ def api_me():
     return jsonify({'authenticated': True, 'user': name, 'role': role,
                     'must_change': bool(isinstance(rec, dict) and rec.get('must_change')),
                     'fqdn': socket.getfqdn(),
+                    'banner': db.get_setting('banner'),
                     'version': APP_VERSION})
 
 
 @bp.route('/api/version')
 def api_version():
     return jsonify({'app': 'nexus-ipam', 'version': APP_VERSION, 'fqdn': socket.getfqdn()})
+
+
+@bp.route('/api/settings/banner', methods=['GET', 'POST'])
+def banner_setting():
+    """Free-text sidebar banner shown in place of the host FQDN. Stored in the
+    meta table; empty string means "fall back to the FQDN". Deliberately NOT a
+    public endpoint — the login page must not leak operator-set text. Writes
+    are admin-only via the central RBAC guard, like every other POST."""
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        text = (data.get('banner') or '').strip()
+        if not re.match(r'^[^\r\n]{0,64}$', text):
+            return err('Banner must be one line of at most 64 characters')
+        db.set_setting('banner', text)
+        db.audit(actor(), 'update', 'settings', None,
+                 'banner set to "%s"' % text if text else 'banner cleared')
+        return jsonify({'success': True, 'banner': text})
+    return jsonify({'banner': db.get_setting('banner')})
 
 
 @bp.route('/api/account/password', methods=['POST'])

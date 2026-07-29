@@ -926,3 +926,32 @@ def test_audit_prune_requires_admin(client, monkeypatch):
     monkeypatch.setattr(auth, '_users',
                         lambda: {'admin': {'password': 'x', 'role': 'readonly'}})
     assert client.post('/api/audit/prune', json={'days': 30}).status_code == 403
+
+
+def test_banner_setting_roundtrip(client):
+    assert client.get('/api/settings/banner').json['banner'] == ''
+
+    r = client.post('/api/settings/banner', json={'banner': 'Homelab HQ'})
+    assert r.json['success'] and r.json['banner'] == 'Homelab HQ'
+    assert client.get('/api/settings/banner').json['banner'] == 'Homelab HQ'
+    # The sidebar learns the banner from /api/me on every page load.
+    assert client.get('/api/me').json['banner'] == 'Homelab HQ'
+
+    # One line, bounded — same barrier as every other stored text.
+    assert client.post('/api/settings/banner',
+                       json={'banner': 'a' * 65}).status_code == 400
+    assert client.post('/api/settings/banner',
+                       json={'banner': 'two\nlines'}).status_code == 400
+
+    # Empty clears it (UI falls back to the FQDN).
+    assert client.post('/api/settings/banner', json={'banner': ''}).json['success']
+    assert client.get('/api/settings/banner').json['banner'] == ''
+
+
+def test_banner_write_requires_admin(client, monkeypatch):
+    from nexusipam.core import auth
+    monkeypatch.setattr(auth, '_users',
+                        lambda: {'admin': {'password': 'x', 'role': 'readonly'}})
+    assert client.post('/api/settings/banner',
+                       json={'banner': 'nope'}).status_code == 403
+    assert client.get('/api/settings/banner').status_code == 200

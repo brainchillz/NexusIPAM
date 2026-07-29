@@ -362,6 +362,19 @@ def now():
     return int(time.time())
 
 
+# ─── App settings (meta key/value table) ──────────────────────────────
+
+def get_setting(key, default=''):
+    row = query_one('SELECT value FROM meta WHERE key=?', (key,))
+    return row['value'] if row else default
+
+
+def set_setting(key, value):
+    execute("INSERT INTO meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)))
+
+
 # ─── Row <-> JSON helpers ─────────────────────────────────────────────
 
 def load_meta(row):

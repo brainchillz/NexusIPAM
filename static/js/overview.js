@@ -18,7 +18,7 @@ async function page_overview() {
       <div class="card card-link" onclick="showPage('networks')">
         <div class="card-head">${icon('net')} Networks</div>
         <div class="card-value">${c.networks}<span class="card-unit">defined</span></div>
-        <div class="card-sub">${c.containers_nets} supernet(s) &middot; ${c.vlans} VLAN(s)</div>
+        <div class="card-sub">${c.containers_nets} supernet(s) &middot; ${c.vlans} VLAN(s) &middot; ${c.dhcp_ranges} DHCP pool(s)</div>
       </div>
       <div class="card card-link" onclick="showPage('addresses')">
         <div class="card-head">${icon('hash')} IP records</div>
@@ -29,16 +29,6 @@ async function page_overview() {
         <div class="card-head">${icon('srv')} Inventory</div>
         <div class="card-value">${c.devices + c.vms + c.containers}<span class="card-unit">objects</span></div>
         <div class="card-sub">${c.devices} device(s) &middot; ${c.vms} VM(s) &middot; ${c.containers} container(s)</div>
-      </div>
-      <div class="card card-link" onclick="showPage('scan')">
-        <div class="card-head">${icon('rad')} Last sweep</div>
-        <div class="card-value" style="font-size:1.3em">${ov.scan.last ? fmtAgo(ov.scan.last) : 'never'}</div>
-        <div class="card-sub">${fmtNum(ov.scan.known)} address(es) probed${ov.scan.unmanaged ? ` &middot; <strong style="color:var(--red)">${ov.scan.unmanaged} unmanaged</strong>` : ''}</div>
-      </div>
-      <div class="card card-link" onclick="showPage('dhcp')">
-        <div class="card-head">${icon('swap')} Services</div>
-        <div class="card-value">${c.dhcp_ranges}<span class="card-unit">DHCP pools</span></div>
-        <div class="card-sub">${c.dhcp_servers} DHCP &middot; ${c.dns_servers} DNS server(s)</div>
       </div>
     </div>`;
 

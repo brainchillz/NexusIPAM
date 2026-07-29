@@ -1,12 +1,14 @@
-// Settings: users, API tokens, TLS, backup/restore, health and the audit log.
+// Settings: sidebar banner, users, API tokens, TLS, backup/restore, health
+// and the audit log.
 
 async function page_settings() {
-  const [users, tokens, tls, health, version] = await Promise.all([
+  const [users, tokens, tls, health, version, banner] = await Promise.all([
     API.get('/api/users').catch(() => []),
     API.get('/api/tokens').catch(() => []),
     API.get('/api/tls/info').catch(() => ({present: false})),
     API.get('/api/health').catch(() => ({ok: true, issues: []})),
     API.get('/api/version').catch(() => ({})),
+    API.get('/api/settings/banner').catch(() => ({banner: ''})),
   ]);
 
   $('page-content').innerHTML = `
@@ -19,6 +21,15 @@ async function page_settings() {
         ${i.examples && i.examples.length ? `<br><span class="muted">${escapeHtml(i.examples.join(', '))}</span>` : ''}
       </div>`).join('')
       : '<div class="health-ok">No consistency problems found.</div>'}
+
+    <h3 style="margin-top:24px">Sidebar banner</h3>
+    <p class="help">Shown in the top-left corner in place of the host name.
+      Leave empty to show this host's FQDN (${escapeHtml(version.fqdn || '')}).</p>
+    <form class="filters" onsubmit="saveBanner(event)">
+      <div class="form-group grow"><input id="banner-text" class="form-control" maxlength="64"
+        placeholder="e.g. Homelab HQ — production"></div>
+      <button class="btn btn-sm" type="submit">Save</button>
+    </form>
 
     <h3 style="margin-top:24px">Users</h3>
     <div class="toolbar"><button class="btn btn-sm" onclick="userModal()">+ Add user</button></div>
@@ -79,7 +90,17 @@ async function page_settings() {
     <p class="help" style="margin-top:24px">Nexus IPAM ${escapeHtml(version.version || '')}
       ${version.fqdn ? '&middot; ' + escapeHtml(version.fqdn) : ''}</p>`;
 
+  // Set via .value, not the HTML attribute — the banner is free text.
+  $('banner-text').value = banner.banner || '';
   fillAuditInfo();
+}
+
+async function saveBanner(e) {
+  if (e) e.preventDefault();
+  try {
+    const r = await API.post('/api/settings/banner', {banner: $('banner-text').value.trim()});
+    applyBanner(r.banner);   // take effect immediately, no reload needed
+  } catch (err) { alert(err.message); }
 }
 
 // ─── Users ────────────────────────────────────────────────

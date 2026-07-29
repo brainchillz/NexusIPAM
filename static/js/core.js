@@ -52,6 +52,12 @@ function jsArg(s) {
 let isAuthed = false;
 let currentUser = '';
 let currentRole = 'admin';
+let currentFqdn = '';
+
+// Sidebar title: the operator-set banner wins; otherwise the host FQDN.
+function applyBanner(banner) {
+  $('sidebar-title').textContent = banner || currentFqdn || 'Nexus IPAM';
+}
 let currentPage = 'overview';
 let currentArg = null;
 
@@ -330,7 +336,7 @@ function showLogin() {
   $('login-user').focus();
 }
 
-async function showApp(user, fqdn, role, mustChange) {
+async function showApp(user, fqdn, role, mustChange, banner) {
   isAuthed = true;
   currentRole = role || 'admin';
   $('login-screen').style.display = 'none';
@@ -338,7 +344,8 @@ async function showApp(user, fqdn, role, mustChange) {
   document.querySelector('.content').style.display = '';
   document.body.classList.toggle('readonly', currentRole !== 'admin');
   currentUser = user || '';
-  if (fqdn) $('sidebar-title').textContent = fqdn;
+  currentFqdn = fqdn || '';
+  applyBanner(banner);
   $('account-user').textContent = user ? `Signed in as ${user}${currentRole !== 'admin' ? ' · read-only' : ''}` : '';
   restoreNavGroups();
   showPage('overview');
@@ -373,7 +380,7 @@ async function doLogin(e) {
       errEl.style.display = 'block';
       return;
     }
-    showApp(j.user, j.fqdn, j.role, j.must_change);
+    showApp(j.user, j.fqdn, j.role, j.must_change, j.banner);
   } catch (err) {
     errEl.textContent = 'Login failed';
     errEl.style.display = 'block';
@@ -413,7 +420,7 @@ async function checkAuth() {
     const r = await fetch('/api/me');
     if (!r.ok) { showLogin(); return; }
     const j = await r.json();
-    showApp(j.user, j.fqdn, j.role, j.must_change);
+    showApp(j.user, j.fqdn, j.role, j.must_change, j.banner);
   } catch (err) { showLogin(); }
 }
 
