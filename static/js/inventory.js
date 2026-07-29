@@ -174,10 +174,11 @@ function renderInventory(title, path, rows, cols, modalFn, empty) {
   const withActions = cols.concat([{label: '', cls: 'row-actions', get: r => canWrite() ? `
     <button class="btn btn-sm btn-outline" onclick="${modalFn}(${r.id})">Edit</button>
     <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/${path}', ${r.id}, '${jsArg(r.name)}')">Delete</button>` : ''}]);
+  if (canWrite()) withActions.unshift(bulkCol('/api/' + path, r => r.name));
   const tagBar = path === 'devices' ? (window._deviceTagBar || '') : '';
   $('page-content').innerHTML = `
     <div class="page-header"><h2>${escapeHtml(title)}</h2></div>
-    ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="${modalFn}()">+ Add</button></div>` : ''}
+    ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="${modalFn}()">+ Add</button>${bulkBtn()}</div>` : ''}
     ${tagBar}
     ${dataTable(withActions, rows, empty)}`;
 }

@@ -523,6 +523,10 @@ html.theme-light {
 .util-cell { min-width: 150px; }
 .util-cell .usage-bar { margin: 0; }
 
+/* Bulk-select column: tick boxes stay narrow and on-theme */
+.table .sel-cell { width: 30px; text-align: center; }
+input[type="checkbox"] { accent-color: var(--primary); }
+
 /* Compact bar for table rows */
 .usage-bar.sm { height: 17px; }
 .usage-bar.sm .usage-bar-label { line-height: 17px; font-size: 10px; }

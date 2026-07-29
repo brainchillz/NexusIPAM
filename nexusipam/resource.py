@@ -250,6 +250,44 @@ def handle_delete(name, rid):
     return jsonify({'success': True})
 
 
+def handle_bulk_delete(name):
+    """Tick-box path: delete many records in one call. Every row goes through
+    the same protect_delete guard as a single delete; a refusal (device still
+    holding addresses, network with children, …) is reported per row instead
+    of failing the whole batch, so one protected record does not strand the
+    other 400 selections."""
+    res = REGISTRY[name]
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids')
+    if not isinstance(ids, list) or not ids:
+        return err('Expected {"ids": [ ... ]}')
+    if len(ids) > 1000:
+        return err('Too many ids in one call (max 1000)')
+    deleted, refused, missing = [], [], 0
+    with db.WRITE_LOCK:
+        for rid in ids:
+            rid = num(rid)
+            existing = db.row('SELECT * FROM %s WHERE id=?' % res.table,
+                              (rid,)) if rid is not None else None
+            if not existing:
+                missing += 1
+                continue
+            label = existing.get(res.label) or '#%s' % rid
+            if res.protect_delete:
+                msg = res.protect_delete(existing)
+                if msg:
+                    refused.append({'id': rid, 'label': label, 'error': msg})
+                    continue
+            db.delete(res.table, rid)
+            if res.on_change:
+                res.on_change('delete', rid, existing)
+            deleted.append(label)
+        if deleted:
+            db.audit(actor(), 'bulk-delete', name, None, db.audit_list(deleted))
+    return jsonify({'success': True, 'deleted': len(deleted),
+                    'refused': refused, 'missing': missing})
+
+
 def _integrity_message(res, ex):
     """Turn SQLite's constraint text into something an operator can act on."""
     text = str(ex)
@@ -285,3 +323,5 @@ def mount(bp, name, url=None):
                     view_func=lambda rid, n=name: handle_update(n, rid), methods=['POST'])
     bp.add_url_rule(path + '/<int:rid>', endpoint='%s_delete' % name,
                     view_func=lambda rid, n=name: handle_delete(n, rid), methods=['DELETE'])
+    bp.add_url_rule(path + '/bulk-delete', endpoint='%s_bulk_delete' % name,
+                    view_func=lambda n=name: handle_bulk_delete(n), methods=['POST'])

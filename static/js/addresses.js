@@ -40,6 +40,7 @@ function addressColumns(opts) {
   cols.push({label: '', cls: 'row-actions', get: a => canWrite() ? `
     <button class="btn btn-sm btn-outline" onclick="addressModal(${a.id})">Edit</button>
     <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/addresses', ${a.id}, '${jsArg(a.address)}')">Delete</button>` : ''});
+  if (opts.bulk && canWrite()) cols.unshift(bulkCol('/api/addresses', a => a.address));
   return cols;
 }
 
@@ -64,7 +65,7 @@ async function page_addresses(id) {
     <div class="page-header"><h2>IP Addresses</h2></div>
     ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="addressModal()">+ Add address</button>
       <button class="btn btn-sm btn-outline" onclick="importAddressesModal()">Import</button>
-      <a class="btn btn-sm btn-outline" href="/api/export/csv">Export CSV</a></div>` : ''}
+      <a class="btn btn-sm btn-outline" href="/api/export/csv">Export CSV</a>${bulkBtn()}</div>` : ''}
     <div class="filters">
       <div class="form-group grow"><label>Search</label>
         <input id="fl-q" class="form-control" value="${escapeHtml(_addrFilters.q)}"
@@ -91,7 +92,7 @@ async function page_addresses(id) {
       <button class="btn btn-sm btn-outline" onclick="clearAddrFilters()">Clear</button>
     </div>
     <p class="help">${data.count} record(s)${data.count === data.limit ? ` — showing the first ${data.limit}; narrow the filters to see more` : ''}</p>
-    ${dataTable(addressColumns(), data.addresses, 'No address records match these filters')}`;
+    ${dataTable(addressColumns({bulk: true}), data.addresses, 'No address records match these filters')}`;
 }
 
 function applyAddrFilters() {

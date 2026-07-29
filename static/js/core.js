@@ -263,6 +263,61 @@ async function deleteResource(path, id, label, after) {
   } catch (e) { alert(e.message); }
 }
 
+// ─── Bulk selection (tick boxes + Delete selected) ──────
+// A list page opts in by prepending bulkCol(path, labelOf) to its columns and
+// dropping bulkBtn() into its toolbar; selection state lives in the DOM, so a
+// page re-render naturally clears it.
+let _bulkPath = '';
+
+function bulkCol(path, labelOf) {
+  _bulkPath = path;
+  return {label: '', cls: 'sel-cell',
+    labelHtml: '<input type="checkbox" title="Select all" onclick="bulkToggleAll(this.checked)">',
+    get: r => `<input type="checkbox" class="row-sel" value="${r.id}"
+      data-label="${escapeHtml(labelOf(r)).replace(/"/g, '&quot;')}" onchange="bulkRefresh()">`};
+}
+
+function bulkBtn() {
+  return `<button id="bulk-delete-btn" class="btn btn-sm btn-danger" style="display:none"
+    onclick="bulkDelete()">Delete selected</button>`;
+}
+
+function bulkSelected() { return [...document.querySelectorAll('.row-sel:checked')]; }
+
+function bulkToggleAll(on) {
+  document.querySelectorAll('.row-sel').forEach(c => { c.checked = on; });
+  bulkRefresh();
+}
+
+function bulkRefresh() {
+  const btn = $('bulk-delete-btn');
+  if (!btn) return;
+  const n = bulkSelected().length;
+  btn.style.display = n ? '' : 'none';
+  btn.textContent = `Delete selected (${n})`;
+}
+
+async function bulkDelete() {
+  const picked = bulkSelected();
+  if (!picked.length) return;
+  const names = picked.map(c => c.dataset.label);
+  const shown = names.slice(0, 10).join(', ') +
+    (names.length > 10 ? ` … +${names.length - 10} more` : '');
+  if (!confirm(`Delete ${picked.length} item(s)?\n\n${shown}`)) return;
+  try {
+    const r = await API.post(_bulkPath + '/bulk-delete',
+      {ids: picked.map(c => Number(c.value))});
+    // Guarded rows (still hosting children, still holding addresses, …) are
+    // refused individually — report them; the rest are already gone.
+    if (r.refused && r.refused.length) {
+      alert(`Deleted ${r.deleted}. Refused ${r.refused.length}:\n` +
+        r.refused.slice(0, 8).map(x => `  ${x.label} — ${x.error}`).join('\n') +
+        (r.refused.length > 8 ? `\n  … +${r.refused.length - 8} more` : ''));
+    }
+    reloadPage();
+  } catch (e) { alert(e.message); }
+}
+
 // ─── Option loaders (shared by several forms) ───────────
 let _hostCache = null;
 async function hostOptions(includeBlank) {
@@ -283,7 +338,7 @@ async function selectOptions(url, key, labelFn, includeBlank) {
 // {label, get(row) -> html, cls}. Keeps every listing page consistent and
 // removes the repeated `.map(r => '<tr>...').join('')` boilerplate.
 function dataTable(cols, rows, emptyMessage) {
-  const head = cols.map(c => `<th class="${c.cls || ''}">${escapeHtml(c.label)}</th>`).join('');
+  const head = cols.map(c => `<th class="${c.cls || ''}">${c.labelHtml || escapeHtml(c.label)}</th>`).join('');
   if (!rows.length) {
     return `<table class="table"><thead><tr>${head}</tr></thead><tbody>
       <tr><td colspan="${cols.length}">${escapeHtml(emptyMessage || 'Nothing here yet')}</td></tr></tbody></table>`;

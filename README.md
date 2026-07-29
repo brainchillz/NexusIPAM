@@ -307,7 +307,14 @@ POST   /api/<resource>          create    (+ ?upsert=1)
 GET    /api/<resource>/<id>     read
 POST   /api/<resource>/<id>     update
 DELETE /api/<resource>/<id>     delete
+POST   /api/<resource>/bulk-delete    {"ids": [...]}  (max 1000)
 ```
+
+Bulk delete applies the same per-record guards as a single delete — a device
+still hosting VMs is refused with the reason while the rest of the batch
+proceeds, and the response reports `deleted` / `refused` / `missing` so
+nothing disappears silently. The UI exposes it as tick boxes + a *Delete
+selected* button on the networks, addresses, VLANs and inventory pages.
 
 for `networks`, `vlans`, `addresses`, `devices`, `vms`, `containers`,
 `clusters`, `dhcp/servers`, `dhcp/ranges`, `dns/servers`.

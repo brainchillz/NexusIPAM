@@ -30,14 +30,7 @@ async function page_networks(id) {
     return {...n, _indent: indent};
   });
 
-  $('page-content').innerHTML = `
-    <div class="page-header"><h2>Networks</h2></div>
-    ${searchBar()}
-    ${canWrite() ? `<div class="toolbar">
-      <button class="btn btn-sm" onclick="networkModal()">+ Add network</button>
-      <button class="btn btn-sm btn-outline" onclick="showPage('vlans')">Manage VLANs</button>
-    </div>` : ''}
-    ${dataTable([
+  const cols = [
       {label: 'Network', get: n => n._indent +
         `<a class="cidr" onclick="showPage('networks', ${n.id})">${escapeHtml(n.cidr)}</a>` +
         (n.role === 'container' ? ' ' + typeBadge('supernet') : '')},
@@ -52,7 +45,18 @@ async function page_networks(id) {
       {label: '', cls: 'row-actions', get: n => canWrite() ? `
         <button class="btn btn-sm btn-outline" onclick="networkModal(${n.id})">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/networks', ${n.id}, '${jsArg(n.cidr)}')">Delete</button>` : ''},
-    ], rows, 'No networks yet — add one to start tracking addresses')}`;
+  ];
+  if (canWrite()) cols.unshift(bulkCol('/api/networks', n => n.cidr));
+
+  $('page-content').innerHTML = `
+    <div class="page-header"><h2>Networks</h2></div>
+    ${searchBar()}
+    ${canWrite() ? `<div class="toolbar">
+      <button class="btn btn-sm" onclick="networkModal()">+ Add network</button>
+      <button class="btn btn-sm btn-outline" onclick="showPage('vlans')">Manage VLANs</button>
+      ${bulkBtn()}
+    </div>` : ''}
+    ${dataTable(cols, rows, 'No networks yet — add one to start tracking addresses')}`;
 }
 
 async function networkModal(id) {

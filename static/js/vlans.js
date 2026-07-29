@@ -17,10 +17,7 @@ async function page_vlans() {
     if (n.vlan_id) (netsByVlan[n.vlan_id] = netsByVlan[n.vlan_id] || []).push(n);
   });
 
-  $('page-content').innerHTML = `
-    <div class="page-header"><h2>VLANs</h2></div>
-    ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="vlanModal()">+ Add VLAN</button></div>` : ''}
-    ${dataTable([
+  const cols = [
       {label: 'VID', cls: 'num', get: v => `<span class="cidr">${escapeHtml(v.vid)}</span>`},
       {label: 'Name', get: v => escapeHtml(v.name || '')},
       {label: 'Site', get: v => escapeHtml(v.site || '') || '<span class="muted">—</span>'},
@@ -32,7 +29,13 @@ async function page_vlans() {
       {label: '', cls: 'row-actions', get: v => canWrite() ? `
         <button class="btn btn-sm btn-outline" onclick="vlanModal(${v.id})">Edit</button>
         <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/vlans', ${v.id}, 'VLAN ${jsArg(v.vid)}')">Delete</button>` : ''},
-    ], data.vlans, 'No VLANs defined')}
+  ];
+  if (canWrite()) cols.unshift(bulkCol('/api/vlans', v => 'VLAN ' + v.vid));
+
+  $('page-content').innerHTML = `
+    <div class="page-header"><h2>VLANs</h2></div>
+    ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="vlanModal()">+ Add VLAN</button>${bulkBtn()}</div>` : ''}
+    ${dataTable(cols, data.vlans, 'No VLANs defined')}
     <p class="help">Deleting a VLAN leaves its networks in place — they simply lose the VLAN link.</p>`;
 }
 

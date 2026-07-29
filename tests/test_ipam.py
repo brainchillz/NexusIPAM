@@ -976,6 +976,36 @@ def test_batch_audit_details_name_the_objects(client, monkeypatch):
     assert db.audit_list(range(10), limit=3) == '0, 1, 2 +7 more'
 
 
+def test_bulk_delete_mixes_deletions_refusals_and_missing(client):
+    mknet(client, '10.94.0.0/24')
+    ids = [client.post('/api/addresses', json={'address': '10.94.0.%d' % i}).json['id']
+           for i in (1, 2, 3)]
+
+    r = client.post('/api/addresses/bulk-delete', json={'ids': [ids[0], ids[1], 99999]})
+    assert r.json['deleted'] == 2 and r.json['missing'] == 1 and r.json['refused'] == []
+    left = [a['address'] for a in client.get('/api/addresses').json['addresses']]
+    assert left == ['10.94.0.3']
+    # The audit entry names what went away, not just a count.
+    entry = client.get('/api/audit?limit=1').json['audit'][0]
+    assert entry['action'] == 'bulk-delete'
+    assert '10.94.0.1' in entry['detail'] and '10.94.0.2' in entry['detail']
+
+    # A guarded row is refused individually; the rest still delete.
+    busy = client.post('/api/devices', json={'name': 'busy', 'role': 'server'}).json['id']
+    idle = client.post('/api/devices', json={'name': 'idle', 'role': 'server'}).json['id']
+    client.post('/api/addresses', json={'address': '10.94.0.7',
+                                        'assigned_kind': 'device', 'assigned_id': busy})
+    r = client.post('/api/devices/bulk-delete', json={'ids': [busy, idle]})
+    assert r.json['deleted'] == 1
+    assert [x['label'] for x in r.json['refused']] == ['busy']
+    assert 'assigned' in r.json['refused'][0]['error']
+    assert client.get('/api/devices/%d' % busy).status_code == 200
+
+    # Garbage input is rejected, not treated as "delete nothing quietly".
+    assert client.post('/api/addresses/bulk-delete', json={}).status_code == 400
+    assert client.post('/api/addresses/bulk-delete', json={'ids': 'all'}).status_code == 400
+
+
 def test_banner_write_requires_admin(client, monkeypatch):
     from nexusipam.core import auth
     monkeypatch.setattr(auth, '_users',
