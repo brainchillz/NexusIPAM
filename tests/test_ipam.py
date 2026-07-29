@@ -1001,6 +1001,54 @@ def test_bulk_delete_mixes_deletions_refusals_and_missing(client):
     assert 'assigned' in r.json['refused'][0]['error']
     assert client.get('/api/devices/%d' % busy).status_code == 200
 
+
+# ─── Shared-core security fixes (2026-07-29 audit) ─────────────────────
+
+def test_deleted_user_session_is_rejected_not_promoted(client, monkeypatch):
+    """A session cookie for a user no longer in the store must be rejected, not
+    resolved to admin. Regression for the _user_role(None) -> 'admin' bug."""
+    from nexusipam.core import auth
+    # The session says 'admin' (set by the fixture) but the store no longer has
+    # that user — i.e. the account was deleted while the session was live.
+    monkeypatch.setattr(auth, '_users', lambda: {})
+    assert auth._user_role(None) == 'readonly'          # fails safe, never admin
+    # A mutating call from the now-orphaned session is refused as unauthenticated.
+    assert client.post('/api/networks', json={'cidr': '10.0.0.0/24'}).status_code == 401
+
+
+def test_scope_id_addresses_are_rejected(client):
+    """An IPv6 scope-id can carry newlines past ipaddress into rendered exports.
+    parse_ip must reject '%', and the API must 400 rather than store it."""
+    from nexusipam import netutil
+    payload = 'fe80::1%lo\naddress=/evil.example/10.0.0.1'
+    assert netutil.parse_ip(payload) is None
+    assert netutil.parse_ip('fe80::1%eth0') is None      # even a benign scope-id
+    r = client.post('/api/addresses', json={'address': payload})
+    assert r.status_code == 400
+    # A plain IPv6 address still works.
+    mknet(client, '2001:db8::/64')
+    assert client.post('/api/addresses', json={'address': '2001:db8::5'}).status_code == 200
+
+
+def test_login_hashes_once_per_path(client, monkeypatch):
+    """Unknown user and known-user-wrong-password must each cost exactly one
+    password hash, so response time does not reveal whether a username exists."""
+    from nexusipam.core import auth
+    calls = {'n': 0}
+    real = auth.check_password_hash
+    monkeypatch.setattr(auth, 'check_password_hash',
+                        lambda h, p: (calls.__setitem__('n', calls['n'] + 1), real(h, p))[1])
+    monkeypatch.setattr(auth, 'load_config',
+                        lambda: {'users': {'admin': {'password': auth.generate_password_hash('right'),
+                                                      'role': 'admin'}}})
+    calls['n'] = 0
+    client.post('/api/login', json={'username': 'ghost', 'password': 'x'})   # unknown
+    unknown_hashes = calls['n']
+    calls['n'] = 0
+    client.post('/api/login', json={'username': 'admin', 'password': 'wrong'})  # known, wrong
+    known_wrong_hashes = calls['n']
+    assert unknown_hashes == 1 and known_wrong_hashes == 1
+
     # Garbage input is rejected, not treated as "delete nothing quietly".
     assert client.post('/api/addresses/bulk-delete', json={}).status_code == 400
     assert client.post('/api/addresses/bulk-delete', json={'ids': 'all'}).status_code == 400

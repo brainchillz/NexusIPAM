@@ -21,9 +21,15 @@ def hexify(value):
 
 
 def parse_ip(text):
-    """Return an ip_address, or None. Rejects anything with a prefix."""
+    """Return an ip_address, or None. Rejects anything with a prefix, and any
+    IPv6 scope-id (`fe80::1%zone`): CPython's ipaddress accepts newlines, `=`,
+    `,` and spaces inside a scope-id, and a stored value with an embedded
+    newline would smuggle an extra line into the rendered dnsmasq exports."""
+    s = str(text).strip()
+    if '%' in s:
+        return None
     try:
-        return ipaddress.ip_address(str(text).strip())
+        return ipaddress.ip_address(s)
     except (ValueError, TypeError):
         return None
 
@@ -31,8 +37,11 @@ def parse_ip(text):
 def parse_network(text, strict=False):
     """Return an ip_network, or None. strict=False so 10.0.0.5/24 is accepted
     and normalized to 10.0.0.0/24 (what people actually type)."""
+    s = str(text).strip()
+    if '%' in s:                      # no scope-ids in a network literal
+        return None
     try:
-        return ipaddress.ip_network(str(text).strip(), strict=strict)
+        return ipaddress.ip_network(s, strict=strict)
     except (ValueError, TypeError):
         return None
 

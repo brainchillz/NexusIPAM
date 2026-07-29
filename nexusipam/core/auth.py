@@ -79,7 +79,12 @@ def _user_hash(rec):
 
 
 def _user_role(rec):
-    return 'admin' if isinstance(rec, str) else (rec or {}).get('role', 'admin')
+    # A missing record (deleted user) must NOT default to admin — fail safe to
+    # the least-privileged role. The bare-string form is a legacy pre-role
+    # record and stays admin.
+    if isinstance(rec, str):
+        return 'admin'
+    return (rec or {}).get('role', 'readonly')
 
 
 def _count_admins(users):
@@ -141,7 +146,13 @@ def _resolve_identity():
     token. Returns (None, None) if unauthenticated."""
     user = session.get('user')
     if user:
-        return user, _user_role(_users().get(user))
+        rec = _users().get(user)
+        # A session whose user no longer exists (deleted or renamed) is no
+        # longer valid — reject it instead of resolving a role for a missing
+        # record, which would otherwise promote the stale session.
+        if rec is None:
+            return None, None
+        return user, _user_role(rec)
     rec = _resolve_token(_bearer_token())
     if rec:
         _touch_token(rec)
@@ -228,7 +239,11 @@ def api_login():
                         'fqdn': socket.getfqdn(),
                         'banner': db.get_setting('banner')})
 
-    check_password_hash(_DUMMY_HASH, password)  # equalize timing for unknown users
+    # Dummy hash ONLY for an unknown user: a wrong password on a real account
+    # already ran one real hash above, so both paths now cost exactly one hash
+    # and the response time no longer reveals whether the username exists.
+    if not rec:
+        check_password_hash(_DUMMY_HASH, password)
     _LOGIN_FAILS[ip] = (cnt + 1, first or now)
     return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
