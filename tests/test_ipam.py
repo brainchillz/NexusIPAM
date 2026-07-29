@@ -1023,6 +1023,10 @@ def test_scope_id_addresses_are_rejected(client):
     payload = 'fe80::1%lo\naddress=/evil.example/10.0.0.1'
     assert netutil.parse_ip(payload) is None
     assert netutil.parse_ip('fe80::1%eth0') is None      # even a benign scope-id
+    # Every IPv6 parse helper must reject scope-ids, not just parse_ip.
+    assert netutil.parse_network('fe80::1%lo/64') is None
+    assert netutil.prefix_from_parts('fe80::1%lo\nx', 128) is None
+    assert netutil.prefix_from_parts('2001:db8::1', 64) == '2001:db8::/64'
     r = client.post('/api/addresses', json={'address': payload})
     assert r.status_code == 400
     # A plain IPv6 address still works.

@@ -125,6 +125,8 @@ def range_size(start_hex, end_hex):
 
 def prefix_from_parts(address, prefixlen):
     """Build a normalized CIDR from an address plus a prefix length."""
+    if '%' in str(address):          # no IPv6 scope-ids (same guard as parse_ip)
+        return None
     try:
         return str(ipaddress.ip_network('%s/%s' % (address, prefixlen), strict=False))
     except (ValueError, TypeError):
