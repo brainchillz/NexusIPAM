@@ -171,6 +171,12 @@ function statusBadge(status) {
   return `<span class="status-badge ${map[status] || 'gray'}">${escapeHtml(status || '-')}</span>`;
 }
 
+// Inline stroke icon from the symbol set in index.html. currentColor means
+// it inherits whatever text colour surrounds it.
+function icon(name) {
+  return `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+}
+
 function typeBadge(text) {
   return text ? `<span class="badge-type">${escapeHtml(text)}</span>` : '';
 }

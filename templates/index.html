@@ -9,8 +9,31 @@
 <script>try { if (localStorage.getItem('theme') === 'light') document.documentElement.classList.add('theme-light'); } catch (e) {}</script>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></symbol>
+  <symbol id="i-net" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v3M5 16v-2a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v2"/></symbol>
+  <symbol id="i-loc" viewBox="0 0 24 24"><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><circle cx="12" cy="12" r="6"/></symbol>
+  <symbol id="i-lay" viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></symbol>
+  <symbol id="i-srv" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></symbol>
+  <symbol id="i-box3" viewBox="0 0 24 24"><rect x="2.5" y="13.5" width="8" height="8" rx="1"/><rect x="13.5" y="13.5" width="8" height="8" rx="1"/><rect x="8" y="2.5" width="8" height="8" rx="1"/></symbol>
+  <symbol id="i-mon" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></symbol>
+  <symbol id="i-pkg" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" y1="22" x2="12" y2="12"/></symbol>
+  <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="12" cy="18" r="2.5"/><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M18 8.5V10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8.5"/><path d="M12 12v3.5"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></symbol>
+  <symbol id="i-glb" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-rad" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/></symbol>
+  <symbol id="i-sli" viewBox="0 0 24 24"><line x1="21" y1="6" x2="14" y2="6"/><line x1="10" y1="6" x2="3" y2="6"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="18" x2="16" y2="18"/><line x1="12" y1="18" x2="3" y2="18"/><line x1="14" y1="4" x2="14" y2="8"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="16" x2="16" y2="20"/></symbol>
+  <symbol id="i-srch" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16" y2="16"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+  <symbol id="i-hash" viewBox="0 0 24 24"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></symbol>
+</defs></svg>
 <div id="login-screen" style="display:none">
   <form class="login-box" onsubmit="doLogin(event)">
+    <div class="sidebar-mark" style="margin-bottom:12px"><svg class="ico"><use href="#i-net"/></svg></div>
     <h1>Nexus IPAM</h1>
     <p class="subtitle">IP address management &middot; sign in to continue</p>
     <div class="form-group"><label>Username</label><input id="login-user" class="form-control" autocomplete="username"></div>
@@ -21,42 +44,45 @@
 </div>
 <nav class="sidebar">
   <div class="sidebar-header">
-    <h1 id="sidebar-title">Nexus IPAM</h1>
-    <p class="subtitle">IP address management</p>
+    <div class="sidebar-mark"><svg class="ico"><use href="#i-net"/></svg></div>
+    <div class="sidebar-brand">
+      <h1 id="sidebar-title">Nexus IPAM</h1>
+      <p class="subtitle">IP address management</p>
+    </div>
   </div>
   <ul class="nav-list">
-    <li><a href="#" data-page="overview" class="active"><span class="icon">&#9733;</span> Overview</a></li>
+    <li><a href="#" data-page="overview" class="active"><svg class="ico"><use href="#i-grid"/></svg> Overview</a></li>
 
     <li class="nav-group" data-group="addressing">
       <div class="nav-cat" onclick="toggleNavGroup(this)">Addressing <span class="caret">&#9662;</span></div>
       <ul class="nav-sub">
-        <li><a href="#" data-page="networks"><span class="icon">&#9783;</span> Networks</a></li>
-        <li><a href="#" data-page="addresses"><span class="icon">&#128205;</span> IP Addresses</a></li>
-        <li><a href="#" data-page="vlans"><span class="icon">&#127991;</span> VLANs</a></li>
+        <li><a href="#" data-page="networks"><svg class="ico"><use href="#i-net"/></svg> Networks</a></li>
+        <li><a href="#" data-page="addresses"><svg class="ico"><use href="#i-loc"/></svg> IP Addresses</a></li>
+        <li><a href="#" data-page="vlans"><svg class="ico"><use href="#i-lay"/></svg> VLANs</a></li>
       </ul>
     </li>
 
     <li class="nav-group" data-group="inventory">
       <div class="nav-cat" onclick="toggleNavGroup(this)">Inventory <span class="caret">&#9662;</span></div>
       <ul class="nav-sub">
-        <li><a href="#" data-page="devices"><span class="icon">&#128421;</span> Devices</a></li>
-        <li><a href="#" data-page="clusters"><span class="icon">&#9783;</span> Clusters</a></li>
-        <li><a href="#" data-page="vms"><span class="icon">&#128190;</span> Virtual Machines</a></li>
-        <li><a href="#" data-page="containers"><span class="icon">&#128230;</span> Containers</a></li>
-        <li><a href="#" data-page="topology"><span class="icon">&#127760;</span> Topology</a></li>
+        <li><a href="#" data-page="devices"><svg class="ico"><use href="#i-srv"/></svg> Devices</a></li>
+        <li><a href="#" data-page="clusters"><svg class="ico"><use href="#i-box3"/></svg> Clusters</a></li>
+        <li><a href="#" data-page="vms"><svg class="ico"><use href="#i-mon"/></svg> Virtual Machines</a></li>
+        <li><a href="#" data-page="containers"><svg class="ico"><use href="#i-pkg"/></svg> Containers</a></li>
+        <li><a href="#" data-page="topology"><svg class="ico"><use href="#i-fork"/></svg> Topology</a></li>
       </ul>
     </li>
 
     <li class="nav-group" data-group="services">
       <div class="nav-cat" onclick="toggleNavGroup(this)">Services <span class="caret">&#9662;</span></div>
       <ul class="nav-sub">
-        <li><a href="#" data-page="dhcp"><span class="icon">&#128268;</span> DHCP</a></li>
-        <li><a href="#" data-page="dns"><span class="icon">&#127760;</span> DNS</a></li>
+        <li><a href="#" data-page="dhcp"><svg class="ico"><use href="#i-swap"/></svg> DHCP</a></li>
+        <li><a href="#" data-page="dns"><svg class="ico"><use href="#i-glb"/></svg> DNS</a></li>
       </ul>
     </li>
 
-    <li><a href="#" data-page="scan"><span class="icon">&#128225;</span> Scan &amp; Verify</a></li>
-    <li class="nav-admin-only"><a href="#" data-page="settings"><span class="icon">&#9881;</span> Settings</a></li>
+    <li><a href="#" data-page="scan"><svg class="ico"><use href="#i-rad"/></svg> Scan &amp; Verify</a></li>
+    <li class="nav-admin-only"><a href="#" data-page="settings"><svg class="ico"><use href="#i-sli"/></svg> Settings</a></li>
   </ul>
   <div class="sidebar-footer">
     <div class="footer-account">

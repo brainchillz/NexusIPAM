@@ -52,8 +52,13 @@ a { color: var(--primary); text-decoration: none; }
   flex-direction: column;
   flex-shrink: 0;
 }
-.sidebar-header { padding: 24px 20px 16px; border-bottom: 1px solid var(--border); }
-.sidebar-header h1 { font-size: 18px; font-weight: 700; }
+.sidebar-header {
+  padding: 18px 16px 14px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+}
+.sidebar-brand { min-width: 0; }
+.sidebar-header h1 { font-size: 15px; font-weight: 700; line-height: 1.15;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 .nav-list { list-style: none; padding: 8px 0; flex: 1; }
 .nav-list li { margin: 1px 0; }
@@ -69,7 +74,21 @@ a { color: var(--primary); text-decoration: none; }
 }
 .nav-list a:hover { color: var(--text); background: rgba(255,255,255,0.04); }
 .nav-list a.active { color: var(--primary); background: rgba(193,85,15,0.12); border-left-color: var(--primary); }
-.nav-list .icon { font-size: 16px; width: 20px; text-align: center; }
+/* Stroke icon system — replaces the OS color-emoji glyphs. Class-scoped so
+   generated SVGs (sparklines) keep their own stroke rules. currentColor is
+   the point: icons sit muted like their labels and go orange on the active
+   row, in both themes, with no per-theme work. */
+.ico {
+  width: 16px; height: 16px; flex-shrink: 0;
+  stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; fill: none;
+}
+.card-head .ico { width: 13px; height: 13px; }
+.sidebar-mark {
+  width: 28px; height: 28px; border-radius: 7px; background: var(--primary);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
 
 /* Read-only role: hide create toolbars, destructive buttons, and admin-only nav
    items (server also enforces 403). */
