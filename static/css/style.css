@@ -225,8 +225,10 @@ body.readonly .nav-admin-only { display: none !important; }
   color: var(--text);
 }
 .btn-outline:hover { background: rgba(255,255,255,0.05); }
-.btn-danger { background: var(--red); }
-.btn-danger:hover { background: #dc2626; }
+/* Destructive actions carry the app orange, not alarm red — every delete is
+   already confirm()-guarded, so the color doesn't need to scream. */
+.btn-danger { background: var(--primary); }
+.btn-danger:hover { background: var(--primary-hover); }
 .btn-warning { background: var(--yellow); color: #000; }
 .btn-warning:hover { background: #d97706; }
 .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -388,7 +390,7 @@ select.form-control[multiple] { min-height: 120px; }
 /* ─── Usage bars ──────────────────────── */
 .usage-bar {
   position: relative;
-  height: 18px;
+  height: 21px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -396,15 +398,17 @@ select.form-control[multiple] { min-height: 120px; }
   margin: 8px 0;
 }
 .usage-bar-fill { height: 100%; transition: width 0.3s ease; }
-.usage-bar-fill.green { background: var(--green); }
+/* Utilization is a quantity, not an alarm — fills stay in the app palette
+   (olive drab -> burnt orange) instead of shouting green/red. */
+.usage-bar-fill.green { background: #556b2f; }
 .usage-bar-fill.yellow { background: var(--yellow); }
-.usage-bar-fill.red { background: var(--red); }
+.usage-bar-fill.red { background: var(--primary); }
 .usage-bar-label {
   position: absolute;
   top: 0; left: 0; right: 0;
   text-align: center;
   font-size: 11px;
-  line-height: 18px;
+  line-height: 21px;
   color: var(--text);
   text-shadow: 0 0 2px rgba(0,0,0,0.6);
 }
@@ -520,8 +524,8 @@ html.theme-light {
 .util-cell .usage-bar { margin: 0; }
 
 /* Compact bar for table rows */
-.usage-bar.sm { height: 14px; }
-.usage-bar.sm .usage-bar-label { line-height: 14px; font-size: 10px; }
+.usage-bar.sm { height: 17px; }
+.usage-bar.sm .usage-bar-label { line-height: 17px; font-size: 10px; }
 
 /* ─── Detail layout ───────────────────────────────────────*/
 .detail-grid {
