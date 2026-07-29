@@ -56,7 +56,8 @@ async function page_networks(id) {
       <button class="btn btn-sm btn-outline" onclick="showPage('vlans')">Manage VLANs</button>
       ${bulkBtn()}
     </div>` : ''}
-    ${dataTable(cols, rows, 'No networks yet — add one to start tracking addresses')}`;
+    ${dataTable(cols, rows, 'No networks yet — add one to start tracking addresses',
+                {key: 'networks'})}`;
 }
 
 async function networkModal(id) {

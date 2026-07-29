@@ -18,10 +18,10 @@ async function page_vlans() {
   });
 
   const cols = [
-      {label: 'VID', cls: 'num', get: v => `<span class="cidr">${escapeHtml(v.vid)}</span>`},
-      {label: 'Name', get: v => escapeHtml(v.name || '')},
-      {label: 'Site', get: v => escapeHtml(v.site || '') || '<span class="muted">—</span>'},
-      {label: 'Status', get: v => statusBadge(v.status)},
+      {label: 'VID', cls: 'num', sortKey: 'vid', get: v => `<span class="cidr">${escapeHtml(v.vid)}</span>`},
+      {label: 'Name', sortKey: 'name', get: v => escapeHtml(v.name || '')},
+      {label: 'Site', sortKey: 'site', get: v => escapeHtml(v.site || '') || '<span class="muted">—</span>'},
+      {label: 'Status', sortKey: 'status', get: v => statusBadge(v.status)},
       {label: 'Networks', get: v => (netsByVlan[v.id] || []).map(n =>
         `<a class="cidr" onclick="showPage('networks', ${n.id})">${escapeHtml(n.cidr)}</a>`).join(', ')
         || '<span class="muted">none</span>'},
@@ -35,7 +35,7 @@ async function page_vlans() {
   $('page-content').innerHTML = `
     <div class="page-header"><h2>VLANs</h2></div>
     ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="vlanModal()">+ Add VLAN</button>${bulkBtn()}</div>` : ''}
-    ${dataTable(cols, data.vlans, 'No VLANs defined')}
+    ${dataTable(cols, data.vlans, 'No VLANs defined', {key: 'vlans'})}
     <p class="help">Deleting a VLAN leaves its networks in place — they simply lose the VLAN link.</p>`;
 }
 

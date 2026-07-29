@@ -85,14 +85,14 @@ async function page_clusters(id) {
   if (id) return objectDetail('cluster', id);
   const d = await API.get('/api/clusters');
   renderInventory('Clusters', 'clusters', d.clusters, [
-    {label: 'Name', get: c => `<a onclick="showPage('clusters', ${c.id})">${escapeHtml(c.name)}</a>`},
-    {label: 'Type', get: c => typeBadge(c.kind)},
+    {label: 'Name', sortKey: 'name', get: c => `<a onclick="showPage('clusters', ${c.id})">${escapeHtml(c.name)}</a>`},
+    {label: 'Type', sortKey: 'kind', get: c => typeBadge(c.kind)},
     {label: 'Endpoint', get: c => escapeHtml(c.endpoint || '') || '<span class="muted">—</span>'},
-    {label: 'Devices', cls: 'num', get: c => c.device_count},
-    {label: 'VMs', cls: 'num', get: c => c.vm_count},
-    {label: 'IPs', cls: 'num', get: c => c.ip_count},
-    {label: 'Site', get: c => escapeHtml(c.site || '')},
-    {label: 'Status', get: c => statusBadge(c.status)},
+    {label: 'Devices', cls: 'num', sortKey: 'device_count', get: c => c.device_count},
+    {label: 'VMs', cls: 'num', sortKey: 'vm_count', get: c => c.vm_count},
+    {label: 'IPs', cls: 'num', sortKey: 'ip_count', get: c => c.ip_count},
+    {label: 'Site', sortKey: 'site', get: c => escapeHtml(c.site || '')},
+    {label: 'Status', sortKey: 'status', get: c => statusBadge(c.status)},
   ], 'clusterModal', 'No clusters — add one if you run Proxmox, vCenter or Kubernetes');
 }
 
@@ -116,24 +116,24 @@ async function page_devices(id) {
       ${_deviceTag ? `<button class="btn btn-sm btn-outline" onclick="clearDeviceTag()">Clear filter</button>` : ''}
     </div>`;
   renderInventory('Devices', 'devices', d.devices, [
-    {label: 'Name', get: r => `<a onclick="showPage('devices', ${r.id})">${escapeHtml(r.name)}</a>`},
+    {label: 'Name', sortKey: 'name', get: r => `<a onclick="showPage('devices', ${r.id})">${escapeHtml(r.name)}</a>`},
     // Classification comes from NexusController (AI / Storage / Virtualization
     // / DNS / External / Mixed) and is the axis the fleet is actually organised
     // by; role is IPAM's own coarser vocabulary.
-    {label: 'Class', get: r => (r.meta && r.meta.classification)
+    {label: 'Class', sortKey: r => (r.meta && r.meta.classification) || '', get: r => (r.meta && r.meta.classification)
       ? typeBadge(r.meta.classification) : '<span class="muted">—</span>'},
-    {label: 'Role', get: r => typeBadge(r.role)},
+    {label: 'Role', sortKey: 'role', get: r => typeBadge(r.role)},
     {label: 'Tags', get: r => (r.tags || '').split(',').map(t => t.trim()).filter(Boolean)
       .map(t => `<a class="badge-type" style="cursor:pointer" onclick="filterDevicesByTag('${jsArg(t)}')">${escapeHtml(t)}</a>`)
       .join(' ') || '<span class="muted">—</span>'},
-    {label: 'Cluster', get: r => r.cluster_id ? objLink('cluster', r.cluster_id, r.cluster_name) : '<span class="muted">—</span>'},
+    {label: 'Cluster', sortKey: 'cluster_name', get: r => r.cluster_id ? objLink('cluster', r.cluster_id, r.cluster_name) : '<span class="muted">—</span>'},
     {label: 'Hosts', get: r => [r.virt ? 'VMs (' + r.virt + ')' : '', r.engine ? 'containers (' + r.engine + ')' : '']
       .filter(Boolean).map(t => typeBadge(t)).join(' ') || '<span class="muted">—</span>'},
-    {label: 'VMs', cls: 'num', get: r => r.vm_count},
-    {label: 'Containers', cls: 'num', get: r => r.container_count},
-    {label: 'IPs', cls: 'num', get: r => r.ip_count},
-    {label: 'Location', get: r => escapeHtml([r.site, r.rack, r.position].filter(Boolean).join(' / '))},
-    {label: 'Status', get: r => statusBadge(r.status)},
+    {label: 'VMs', cls: 'num', sortKey: 'vm_count', get: r => r.vm_count},
+    {label: 'Containers', cls: 'num', sortKey: 'container_count', get: r => r.container_count},
+    {label: 'IPs', cls: 'num', sortKey: 'ip_count', get: r => r.ip_count},
+    {label: 'Location', sortKey: r => [r.site, r.rack, r.position].filter(Boolean).join(' / '), get: r => escapeHtml([r.site, r.rack, r.position].filter(Boolean).join(' / '))},
+    {label: 'Status', sortKey: 'status', get: r => statusBadge(r.status)},
   ], 'deviceModal', _deviceTag ? `No devices tagged "${_deviceTag}"`
                                 : 'No devices — add your physical servers, switches and routers');
 }
@@ -142,16 +142,16 @@ async function page_vms(id) {
   if (id) return objectDetail('vm', id);
   const d = await API.get('/api/vms');
   renderInventory('Virtual Machines', 'vms', d.vms, [
-    {label: 'Name', get: r => `<a onclick="showPage('vms', ${r.id})">${escapeHtml(r.name)}</a>`},
-    {label: 'Hypervisor', get: r => typeBadge(r.platform)},
-    {label: 'Host', get: r => r.host_device_id ? objLink('device', r.host_device_id, r.host_name) : '<span class="muted">—</span>'},
-    {label: 'Cluster', get: r => r.cluster_id ? objLink('cluster', r.cluster_id, r.cluster_name) : '<span class="muted">—</span>'},
-    {label: 'Size', get: r => escapeHtml([r.vcpus ? r.vcpus + ' vCPU' : '',
+    {label: 'Name', sortKey: 'name', get: r => `<a onclick="showPage('vms', ${r.id})">${escapeHtml(r.name)}</a>`},
+    {label: 'Hypervisor', sortKey: 'platform', get: r => typeBadge(r.platform)},
+    {label: 'Host', sortKey: 'host_name', get: r => r.host_device_id ? objLink('device', r.host_device_id, r.host_name) : '<span class="muted">—</span>'},
+    {label: 'Cluster', sortKey: 'cluster_name', get: r => r.cluster_id ? objLink('cluster', r.cluster_id, r.cluster_name) : '<span class="muted">—</span>'},
+    {label: 'Size', sortKey: r => r.memory_mb || 0, get: r => escapeHtml([r.vcpus ? r.vcpus + ' vCPU' : '',
       r.memory_mb ? Math.round(r.memory_mb / 1024) + ' GB' : '',
       r.disk_gb ? r.disk_gb + ' GB disk' : ''].filter(Boolean).join(' · ')) || '<span class="muted">—</span>'},
-    {label: 'Containers', cls: 'num', get: r => r.container_count},
-    {label: 'IPs', cls: 'num', get: r => r.ip_count},
-    {label: 'Status', get: r => statusBadge(r.status)},
+    {label: 'Containers', cls: 'num', sortKey: 'container_count', get: r => r.container_count},
+    {label: 'IPs', cls: 'num', sortKey: 'ip_count', get: r => r.ip_count},
+    {label: 'Status', sortKey: 'status', get: r => statusBadge(r.status)},
   ], 'vmModal', 'No virtual machines recorded');
 }
 
@@ -159,14 +159,14 @@ async function page_containers(id) {
   if (id) return objectDetail('container', id);
   const d = await API.get('/api/containers');
   renderInventory('Containers', 'containers', d.containers, [
-    {label: 'Name', get: r => `<a onclick="showPage('containers', ${r.id})">${escapeHtml(r.name)}</a>`},
-    {label: 'Engine', get: r => typeBadge(r.engine)},
-    {label: 'Runs on', get: r => r.parent_kind
+    {label: 'Name', sortKey: 'name', get: r => `<a onclick="showPage('containers', ${r.id})">${escapeHtml(r.name)}</a>`},
+    {label: 'Engine', sortKey: 'engine', get: r => typeBadge(r.engine)},
+    {label: 'Runs on', sortKey: 'parent_name', get: r => r.parent_kind
       ? objLink(r.parent_kind, r.parent_id, r.parent_name) + ' ' + typeBadge(r.parent_kind)
       : '<span class="muted">—</span>'},
-    {label: 'Image', get: r => escapeHtml(r.image || '') || '<span class="muted">—</span>'},
-    {label: 'IPs', cls: 'num', get: r => r.ip_count},
-    {label: 'Status', get: r => statusBadge(r.status)},
+    {label: 'Image', sortKey: 'image', get: r => escapeHtml(r.image || '') || '<span class="muted">—</span>'},
+    {label: 'IPs', cls: 'num', sortKey: 'ip_count', get: r => r.ip_count},
+    {label: 'Status', sortKey: 'status', get: r => statusBadge(r.status)},
   ], 'containerModal', 'No containers recorded');
 }
 
@@ -180,7 +180,7 @@ function renderInventory(title, path, rows, cols, modalFn, empty) {
     <div class="page-header"><h2>${escapeHtml(title)}</h2></div>
     ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="${modalFn}()">+ Add</button>${bulkBtn()}</div>` : ''}
     ${tagBar}
-    ${dataTable(withActions, rows, empty)}`;
+    ${dataTable(withActions, rows, empty, {key: path})}`;
 }
 
 // ─── Forms ────────────────────────────────────────────────

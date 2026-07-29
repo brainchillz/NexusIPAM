@@ -21,19 +21,19 @@ const ADDRESS_FIELDS = [
 function addressColumns(opts) {
   opts = opts || {};
   const cols = [
-    {label: 'Address', get: a => `<a class="cidr" onclick="addressPeek('${jsArg(a.address)}')">${escapeHtml(a.address)}</a>`},
-    {label: 'Status', get: a => statusBadge(a.status)},
-    {label: 'DNS name', get: a => escapeHtml(a.dns_name || '') || '<span class="muted">—</span>'},
-    {label: 'Assigned to', get: a => a.assigned_kind
+    {label: 'Address', sortKey: 'addr_hex', get: a => `<a class="cidr" onclick="addressPeek('${jsArg(a.address)}')">${escapeHtml(a.address)}</a>`},
+    {label: 'Status', sortKey: 'status', get: a => statusBadge(a.status)},
+    {label: 'DNS name', sortKey: 'dns_name', get: a => escapeHtml(a.dns_name || '') || '<span class="muted">—</span>'},
+    {label: 'Assigned to', sortKey: 'assigned_name', get: a => a.assigned_kind
       ? objLink(a.assigned_kind, a.assigned_id, a.assigned_name) + ' ' + typeBadge(a.assigned_kind)
       : '<span class="muted">—</span>'},
-    {label: 'MAC', get: a => escapeHtml(a.mac || '') || '<span class="muted">—</span>'},
-    {label: 'Ping', get: a => a.last_scan
+    {label: 'MAC', sortKey: 'mac', get: a => escapeHtml(a.mac || '') || '<span class="muted">—</span>'},
+    {label: 'Ping', sortKey: a => a.last_alive || 0, get: a => a.last_scan
       ? (a.last_alive ? '<span class="status-badge green">up</span>' : '<span class="status-badge gray">silent</span>')
       : '<span class="muted">—</span>'},
   ];
   if (opts.showNetwork !== false) {
-    cols.splice(1, 0, {label: 'Network', get: a => a.network_id
+    cols.splice(1, 0, {label: 'Network', sortKey: 'network_cidr', get: a => a.network_id
       ? `<a class="cidr" onclick="showPage('networks', ${a.network_id})">${escapeHtml(a.network_cidr)}</a>`
       : '<span class="muted">unmanaged</span>'});
   }
@@ -56,6 +56,7 @@ async function page_addresses(id) {
   const [nets] = await Promise.all([API.get('/api/networks')]);
   const params = new URLSearchParams();
   Object.entries(_addrFilters).forEach(([k, v]) => { if (v) params.set(k, v === true ? '1' : v); });
+  params.set('limit', '2000');   // client-side pagination handles the volume
   const data = await API.get('/api/addresses/search?' + params.toString());
 
   const netOpts = [['', 'All networks']].concat(
@@ -92,7 +93,7 @@ async function page_addresses(id) {
       <button class="btn btn-sm btn-outline" onclick="clearAddrFilters()">Clear</button>
     </div>
     <p class="help">${data.count} record(s)${data.count === data.limit ? ` — showing the first ${data.limit}; narrow the filters to see more` : ''}</p>
-    ${dataTable(addressColumns({bulk: true}), data.addresses, 'No address records match these filters')}`;
+    ${dataTable(addressColumns({bulk: true}), data.addresses, 'No address records match these filters', {key: 'addresses'})}`;
 }
 
 function applyAddrFilters() {

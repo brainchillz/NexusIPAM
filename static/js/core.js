@@ -337,15 +337,92 @@ async function selectOptions(url, key, labelFn, includeBlank) {
 // Renders a <table class="table"> from column specs. `cols` entries are
 // {label, get(row) -> html, cls}. Keeps every listing page consistent and
 // removes the repeated `.map(r => '<tr>...').join('')` boilerplate.
-function dataTable(cols, rows, emptyMessage) {
-  const head = cols.map(c => `<th class="${c.cls || ''}">${c.labelHtml || escapeHtml(c.label)}</th>`).join('');
-  if (!rows.length) {
-    return `<table class="table"><thead><tr>${head}</tr></thead><tbody>
-      <tr><td colspan="${cols.length}">${escapeHtml(emptyMessage || 'Nothing here yet')}</td></tr></tbody></table>`;
+// Plain call renders a static table (detail pages, overview, scan results).
+// Passing opts {key: 'name'} makes it interactive: columns with a `sortKey`
+// (row field name or accessor fn) get click-to-sort headers, and long lists
+// paginate at `pageSize` (default 100). Sort/page state survives page
+// re-renders so applying a filter does not lose your sort.
+const _TABLES = {};      // key -> {cols, rows, empty, opts}  (this render)
+const _TABLE_UI = {};    // key -> {sort, dir, page}          (persistent)
+const TABLE_PAGE_SIZE = 100;
+
+function dataTable(cols, rows, emptyMessage, opts) {
+  if (!opts || !opts.key) {
+    const head = cols.map(c => `<th class="${c.cls || ''}">${c.labelHtml || escapeHtml(c.label)}</th>`).join('');
+    if (!rows.length) {
+      return `<table class="table"><thead><tr>${head}</tr></thead><tbody>
+        <tr><td colspan="${cols.length}">${escapeHtml(emptyMessage || 'Nothing here yet')}</td></tr></tbody></table>`;
+    }
+    const body = rows.map(r => '<tr>' + cols.map(c =>
+      `<td class="${c.cls || ''}">${c.get(r)}</td>`).join('') + '</tr>').join('');
+    return `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
   }
-  const body = rows.map(r => '<tr>' + cols.map(c =>
-    `<td class="${c.cls || ''}">${c.get(r)}</td>`).join('') + '</tr>').join('');
-  return `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  _TABLES[opts.key] = {cols, rows, empty: emptyMessage, opts};
+  return `<div id="dt-${opts.key}">${tableView(opts.key)}</div>`;
+}
+
+// Empty values sort last in either direction; mixed values compare naturally
+// ("web2" before "web10", numbers numerically).
+function _cmp(a, b) {
+  const an = a == null || a === '', bn = b == null || b === '';
+  if (an || bn) return an && bn ? 0 : an ? 1 : -1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b), undefined, {numeric: true, sensitivity: 'base'});
+}
+
+function tableView(key) {
+  const t = _TABLES[key];
+  const ui = _TABLE_UI[key] = _TABLE_UI[key] || {};
+  let rows = t.rows;
+  const col = ui.sort != null ? t.cols[ui.sort] : null;
+  if (col && col.sortKey) {
+    const val = typeof col.sortKey === 'function' ? col.sortKey : r => r[col.sortKey];
+    rows = [...rows].sort((a, b) => _cmp(val(a), val(b)) * (ui.dir || 1));
+  }
+  const size = t.opts.pageSize || TABLE_PAGE_SIZE;
+  const pages = Math.max(1, Math.ceil(rows.length / size));
+  ui.page = Math.min(Math.max(0, ui.page || 0), pages - 1);
+  const start = ui.page * size;
+  const slice = rows.slice(start, start + size);
+
+  const head = t.cols.map((c, i) => {
+    const arrow = ui.sort === i && c.sortKey ? (ui.dir === -1 ? ' &#9662;' : ' &#9652;') : '';
+    return `<th class="${c.cls || ''}${c.sortKey ? ' th-sort' : ''}"` +
+      `${c.sortKey ? ` onclick="tableSort('${key}', ${i})" title="Sort"` : ''}>` +
+      `${c.labelHtml || escapeHtml(c.label)}${arrow}</th>`;
+  }).join('');
+  const body = slice.length ? slice.map(r => '<tr>' + t.cols.map(c =>
+      `<td class="${c.cls || ''}">${c.get(r)}</td>`).join('') + '</tr>').join('')
+    : `<tr><td colspan="${t.cols.length}">${escapeHtml(t.empty || 'Nothing here yet')}</td></tr>`;
+  const pager = rows.length > size ? `
+    <div class="pager">
+      <button class="btn btn-sm btn-outline" ${ui.page === 0 ? 'disabled' : ''}
+        onclick="tablePage('${key}', -1)">&laquo; Prev</button>
+      <span>${fmtNum(start + 1)}&ndash;${fmtNum(Math.min(start + size, rows.length))} of ${fmtNum(rows.length)}</span>
+      <button class="btn btn-sm btn-outline" ${ui.page >= pages - 1 ? 'disabled' : ''}
+        onclick="tablePage('${key}', 1)">Next &raquo;</button>
+    </div>` : '';
+  return `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>${pager}`;
+}
+
+function _tableRedraw(key) {
+  const el = $('dt-' + key);
+  if (el) el.innerHTML = tableView(key);
+  bulkRefresh();   // re-render dropped any ticked boxes with it
+}
+
+function tableSort(key, idx) {
+  const ui = _TABLE_UI[key] = _TABLE_UI[key] || {};
+  if (ui.sort === idx) ui.dir = -(ui.dir || 1);
+  else { ui.sort = idx; ui.dir = 1; }
+  ui.page = 0;
+  _tableRedraw(key);
+}
+
+function tablePage(key, delta) {
+  const ui = _TABLE_UI[key] = _TABLE_UI[key] || {};
+  ui.page = (ui.page || 0) + delta;
+  _tableRedraw(key);
 }
 
 // ─── Global search ──────────────────────────────────────
