@@ -436,5 +436,6 @@ def network_reserve(rid):
                 'source': 'manual', 'ext_id': '', 'meta': '{}'})
             created += 1
         db.audit(actor(), 'reserve', 'networks', rid,
-                 '%s-%s (%d created)' % (data.get('start'), data.get('end'), created))
+                 '%s-%s in %s (%d created)'
+                 % (data.get('start'), data.get('end'), net_row['cidr'], created))
     return jsonify({'success': True, 'created': created, 'skipped': skipped})

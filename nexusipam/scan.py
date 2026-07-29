@@ -378,6 +378,7 @@ def scan_adopt():
     include_dhcp = bool(data.get('include_dhcp'))
     from .networks import network_for
     created, skipped, in_pool = 0, 0, 0
+    adopted = []
     with db.WRITE_LOCK:
         for a in items[:2000]:
             ip = netutil.parse_ip(a)
@@ -402,6 +403,9 @@ def scan_adopt():
                 'description': 'Discovered by ping sweep',
                 'source': 'discovery', 'ext_id': '', 'meta': '{}'})
             created += 1
-        db.audit(actor(), 'adopt', 'ip_addresses', None, '%d discovered hosts' % created)
+            adopted.append('%s (%s)' % (ip, scan['hostname'])
+                           if scan.get('hostname') else str(ip))
+        db.audit(actor(), 'adopt', 'ip_addresses', None,
+                 db.audit_list(adopted) or 'nothing new to adopt')
     return jsonify({'success': True, 'created': created, 'skipped': skipped,
                     'skipped_dhcp': in_pool})

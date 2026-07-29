@@ -454,6 +454,18 @@ def audit(actor, action, kind, oid, detail=''):
         pass  # auditing must never fail a request
 
 
+def audit_list(items, limit=8):
+    """Bounded, readable list for batch-operation audit details. "3 hosts
+    adopted" tells an operator nothing; the first few identities plus a
+    remainder count tells them WHAT was touched without letting a 5000-row
+    import write a novel into one audit row."""
+    items = [s for s in (str(i).strip() for i in items) if s]
+    out = ', '.join(items[:limit])
+    if len(items) > limit:
+        out += ' +%d more' % (len(items) - limit)
+    return out
+
+
 def audit_stats():
     r = query_one('SELECT COUNT(*) c, MIN(ts) oldest FROM audit')
     return {'total': r['c'], 'oldest': r['oldest'] or 0}

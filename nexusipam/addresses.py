@@ -239,6 +239,7 @@ def addresses_bulk():
     replace = bool(data.get('replace'))  # overwrite existing records
 
     results = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': []}
+    touched = {'created': [], 'updated': []}
     with db.WRITE_LOCK:
         for i, item in enumerate(items):
             if not isinstance(item, dict):
@@ -261,10 +262,15 @@ def addresses_bulk():
             if found:
                 db.update('ip_addresses', found['id'], fields)
                 results['updated'] += 1
+                touched['updated'].append(fields['address'])
             else:
                 db.insert('ip_addresses', fields)
                 results['created'] += 1
+                touched['created'].append(fields['address'])
+        parts = ['%s %s' % (what, db.audit_list(addrs))
+                 for what, addrs in touched.items() if addrs]
+        if results['skipped']:
+            parts.append('%d skipped' % results['skipped'])
         db.audit(actor(), 'bulk-import', 'ip_addresses', None,
-                 '%d created, %d updated, %d skipped'
-                 % (results['created'], results['updated'], results['skipped']))
+                 '; '.join(parts) or 'nothing imported')
     return jsonify({'success': True, **results})

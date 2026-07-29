@@ -948,6 +948,34 @@ def test_banner_setting_roundtrip(client):
     assert client.get('/api/settings/banner').json['banner'] == ''
 
 
+def test_batch_audit_details_name_the_objects(client, monkeypatch):
+    """'1 discovered hosts' tells the operator nothing — batch operations must
+    record WHICH addresses were touched, not just how many."""
+    from nexusipam import scan as scan_mod
+    mknet(client, '10.93.0.0/24')
+
+    monkeypatch.setattr(scan_mod, 'probe_one',
+                        lambda a, timeout=None: {'alive': True, 'rtt_ms': 0.4,
+                                                 'method': 'icmp'})
+    monkeypatch.setattr(scan_mod, 'resolve_ptr', lambda a: 'web01.lab')
+    client.post('/api/scan/verify', json={'addresses': ['10.93.0.5']})
+    client.post('/api/scan/adopt', json={'addresses': ['10.93.0.5']})
+    entry = client.get('/api/audit?limit=1').json['audit'][0]
+    assert entry['action'] == 'adopt'
+    assert entry['detail'] == '10.93.0.5 (web01.lab)'
+
+    client.post('/api/addresses/bulk', json={'addresses': [
+        {'address': '10.93.0.10'}, {'address': '10.93.0.11'},
+        {'address': '10.93.0.5'}]})            # .5 exists -> skipped
+    entry = client.get('/api/audit?limit=1').json['audit'][0]
+    assert entry['action'] == 'bulk-import'
+    assert entry['detail'] == 'created 10.93.0.10, 10.93.0.11; 1 skipped'
+
+    # Long batches stay bounded: first few identities plus a remainder count.
+    from nexusipam.core import db
+    assert db.audit_list(range(10), limit=3) == '0, 1, 2 +7 more'
+
+
 def test_banner_write_requires_admin(client, monkeypatch):
     from nexusipam.core import auth
     monkeypatch.setattr(auth, '_users',
