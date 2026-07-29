@@ -10,8 +10,23 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 LIST="private/forbidden-terms.txt"
-[ -f "$LIST" ] || { echo "no $LIST — nothing to check"; exit 0; }
-PATTERN=$(grep -v '^\s*#' "$LIST" | grep -v '^\s*$' | paste -sd'|' -)
+# The term list lives on the (never-published) private branch. Checking out
+# main removes the working-tree copy — tracked there, absent here — so fall
+# back to reading it straight out of that branch. A guard that silently
+# passes because its rule file went missing is worse than no guard.
+if [ -f "$LIST" ]; then
+    TERMS=$(cat "$LIST")
+elif git rev-parse -q --verify private >/dev/null; then
+    TERMS=$(git show "private:$LIST" 2>/dev/null || true)
+else
+    TERMS=""
+fi
+if [ -z "$TERMS" ]; then
+    echo "no term list found (private/forbidden-terms.txt in the working tree"
+    echo "or on the 'private' branch) — nothing to check"
+    exit 0
+fi
+PATTERN=$(printf '%s\n' "$TERMS" | grep -v '^\s*#' | grep -v '^\s*$' | paste -sd'|' -)
 [ -n "$PATTERN" ] || { echo "empty term list"; exit 0; }
 
 fail=0
