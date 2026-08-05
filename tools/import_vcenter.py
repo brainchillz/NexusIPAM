@@ -306,6 +306,13 @@ def main():
                   'not running) — no address recorded for them:' % len(no_tools))
             for n in no_tools:
                 print('    %s' % n)
+    if not args.dry_run:
+        try:   # breadcrumb for the Settings sync panel; never fail the import over it
+            ipam(IP, TOK, '/api/sync/runs', 'POST',
+                 {'source': 'vcenter', 'ok': True,
+                  'detail': 'inventory import completed'})
+        except Exception:
+            pass
     return 0
 
 

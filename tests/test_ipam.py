@@ -1065,3 +1065,54 @@ def test_banner_write_requires_admin(client, monkeypatch):
     assert client.post('/api/settings/banner',
                        json={'banner': 'nope'}).status_code == 403
     assert client.get('/api/settings/banner').status_code == 200
+
+
+# ─── Sync status (importer breadcrumbs) ───────────────────────────────
+
+def test_sync_status_derives_sources_from_data(client):
+    client.post('/api/networks', json={'cidr': '10.9.0.0/24', 'name': 'syncnet'})
+    r = client.post('/api/addresses?upsert=1',
+                    json={'address': '10.9.0.10', 'source': 'unifi',
+                          'ext_id': 'u-1', 'dns_name': 'thing.lan'})
+    assert r.json['success']
+    s = client.get('/api/sync').json
+    assert s['sources']['unifi']['total'] == 1
+    assert s['sources']['unifi']['tables'] == {'ip_addresses': 1}
+    assert s['sources']['unifi']['latest'] > 0
+    assert 'manual' not in s['sources']
+
+
+def test_sync_run_reports(client):
+    r = client.post('/api/sync/runs',
+                    json={'source': 'vcenter', 'ok': True,
+                          'detail': 'inventory import completed',
+                          'counts': {'vms': 42}})
+    assert r.json['success']
+    r = client.post('/api/sync/runs', json={'source': 'unifi', 'ok': False,
+                                            'detail': 'login failed'})
+    assert r.json['success']
+    runs = client.get('/api/sync').json['runs']
+    assert runs[0]['source'] == 'unifi' and runs[0]['ok'] is False
+    assert runs[1]['source'] == 'vcenter' and runs[1]['counts'] == {'vms': 42}
+
+    # invalid payloads are rejected cleanly
+    assert client.post('/api/sync/runs', json={'source': 'bad source'}).status_code == 400
+    assert client.post('/api/sync/runs',
+                       json={'source': 'x', 'counts': {'a': 'lots'}}).status_code == 400
+
+
+def test_sync_runs_bounded(client):
+    from nexusipam import sync as sync_mod
+    for i in range(sync_mod.RUNS_KEEP + 5):
+        client.post('/api/sync/runs', json={'source': 'unifi', 'detail': 'run %d' % i})
+    runs = client.get('/api/sync').json['runs']
+    assert len(runs) == sync_mod.RUNS_KEEP
+    assert runs[0]['detail'] == 'run %d' % (sync_mod.RUNS_KEEP + 4)
+
+
+def test_sync_report_requires_admin(client, monkeypatch):
+    from nexusipam.core import auth
+    monkeypatch.setattr(auth, '_users',
+                        lambda: {'admin': {'password': 'x', 'role': 'readonly'}})
+    assert client.post('/api/sync/runs', json={'source': 'unifi'}).status_code == 403
+    assert client.get('/api/sync').status_code == 200

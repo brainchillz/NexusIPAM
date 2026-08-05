@@ -375,6 +375,13 @@ def main():
 
     print('\nDone. Clients/leases were deliberately NOT imported — the scope '
           'accounts for them.')
+    if not args.dry_run:
+        try:   # breadcrumb for the Settings sync panel; never fail the import over it
+            ipam(args.ipam, args.ipam_token, '/api/sync/runs', 'POST',
+                 {'source': 'unifi', 'ok': True,
+                  'detail': 'topology import completed (UniFi Network %s)' % ver})
+        except Exception:
+            pass
     return 0
 
 

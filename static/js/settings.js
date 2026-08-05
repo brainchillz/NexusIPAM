@@ -2,13 +2,14 @@
 // and the audit log.
 
 async function page_settings() {
-  const [users, tokens, tls, health, version, banner] = await Promise.all([
+  const [users, tokens, tls, health, version, banner, sync] = await Promise.all([
     API.get('/api/users').catch(() => []),
     API.get('/api/tokens').catch(() => []),
     API.get('/api/tls/info').catch(() => ({present: false})),
     API.get('/api/health').catch(() => ({ok: true, issues: []})),
     API.get('/api/version').catch(() => ({})),
     API.get('/api/settings/banner').catch(() => ({banner: ''})),
+    API.get('/api/sync').catch(() => null),
   ]);
 
   $('page-content').innerHTML = `
@@ -21,6 +22,26 @@ async function page_settings() {
         ${i.examples && i.examples.length ? `<br><span class="muted">${escapeHtml(i.examples.join(', '))}</span>` : ''}
       </div>`).join('')
       : '<div class="health-ok">No consistency problems found.</div>'}
+
+    ${sync ? `
+    <h3 style="margin-top:24px">External sources</h3>
+    <p class="help">What each importer owns (derived live from the records' <code>source</code> field)
+      and when its last run finished. Importers report here after every run; the cron wrapper
+      reports failures too, so a silently broken sync shows up as a red row.</p>
+    ${dataTable([
+      {label: 'Source', get: ([s]) => `<code>${escapeHtml(s)}</code>`},
+      {label: 'Records', get: ([, v]) => String(v.total)},
+      {label: 'Breakdown', get: ([, v]) => escapeHtml(Object.entries(v.tables).map(([t, n]) => `${t}: ${n}`).join(' · '))},
+      {label: 'Last change', get: ([, v]) => v.latest ? fmtTs(v.latest) : '—'},
+    ], Object.entries(sync.sources || {}), 'No externally sourced records')}
+    ${(sync.runs || []).length ? `
+    <h4 style="margin-top:14px">Recent importer runs</h4>
+    ${dataTable([
+      {label: 'When', get: r => fmtTs(r.ts)},
+      {label: 'Source', get: r => `<code>${escapeHtml(r.source)}</code>`},
+      {label: '', get: r => r.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'},
+      {label: 'Detail', get: r => escapeHtml(r.detail || '')},
+    ], sync.runs.slice(0, 10), '')}` : ''}` : ''}
 
     <h3 style="margin-top:24px">Sidebar banner</h3>
     <p class="help">Shown in the top-left corner in place of the host name.

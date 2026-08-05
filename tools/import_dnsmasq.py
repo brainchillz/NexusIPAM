@@ -162,6 +162,16 @@ def main():
 
     verb = 'would import' if args.dry_run else 'imported'
     print('\n%s: %d created, %d updated, %d skipped' % (verb, created, updated, skipped))
+    if not args.dry_run:
+        try:   # breadcrumb for the Settings sync panel; never fail the import over it
+            request(args.ipam.rstrip('/') + '/api/sync/runs', args.ipam_token,
+                    'POST', {'source': 'dnsmasq-mgr', 'ok': True,
+                             'detail': '%d created, %d updated, %d skipped'
+                                       % (created, updated, skipped),
+                             'counts': {'created': created, 'updated': updated,
+                                        'skipped': skipped}})
+        except Exception:
+            pass
     if unmanaged:
         print('%d address(es) fall outside every defined network — they are recorded '
               'but unparented.\nDefine those prefixes, or re-run with --only-managed '

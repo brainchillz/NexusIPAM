@@ -224,6 +224,14 @@ def main():
             print('    %s (%s)' % (n['name'], n.get('base_url')))
     print('\n%d device(s) written, %d virtual node(s) left to vCenter.'
           % (created, skipped_vm))
+    if not args.dry_run:
+        try:   # breadcrumb for the Settings sync panel; never fail the import over it
+            ipam(IP, TOK, '/api/sync/runs', 'POST',
+                 {'source': 'nexus-controller', 'ok': True,
+                  'detail': '%d device(s) written' % created,
+                  'counts': {'devices': created}})
+        except Exception:
+            pass
     return 0
 
 
