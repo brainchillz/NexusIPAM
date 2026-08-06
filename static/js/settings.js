@@ -1,7 +1,24 @@
 // Settings: sidebar banner, users, API tokens, TLS, backup/restore, health
 // and the audit log.
+// Appearance (the light/dark switch) is client-side and shown to every role;
+// the server-configuration sections stay admin-only.
+function appearanceSection() {
+  const light = document.documentElement.classList.contains('theme-light');
+  return `
+    <h3 style="margin-top:24px">Appearance</h3>
+    <label class="checkitem" style="max-width:280px">
+      <input type="checkbox" ${light ? 'checked' : ''}
+             onchange="toggleTheme(); page_settings();"> Light theme
+    </label>
+    <p class="help">Stored in this browser only — each browser keeps its own choice.</p>`;
+}
 
 async function page_settings() {
+  if (currentRole !== 'admin') {
+    $('page-content').innerHTML = '<h2>Settings</h2>' + appearanceSection() +
+      '<div class="alert alert-warning" style="margin-top:16px">Server settings require administrator access.</div>';
+    return;
+  }
   const [users, tokens, tls, health, version, banner, sync, push] = await Promise.all([
     API.get('/api/users').catch(() => []),
     API.get('/api/tokens').catch(() => []),
@@ -131,6 +148,8 @@ async function page_settings() {
       <button class="btn btn-sm btn-outline" onclick="showAudit()">View recent changes</button>
       <button class="btn btn-sm btn-outline" onclick="pruneAuditModal()">Prune…</button>
     </div>
+
+    ${appearanceSection()}
 
     <p class="help" style="margin-top:24px">Nexus IPAM ${escapeHtml(version.version || '')}
       ${version.fqdn ? '&middot; ' + escapeHtml(version.fqdn) : ''}</p>`;

@@ -1,38 +1,43 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
-/* Nexus identity: dark grey base, lighter grey surfaces/text, burnt orange
-   headers/accents/borders. Panel & header borders carry the orange; row
-   separators use --border-soft so tables stay readable. Status colors
-   (green/yellow/red) stay semantic. */
+/* Nexus identity: warm dark grey base, hairline structural borders, burnt
+   orange spent as the accent (active nav, primary buttons, focus, brand) —
+   never as wallpaper. Status colors are tuned to sit next to the orange:
+   ok = olive, warn = amber, crit = cold brick (deliberately NOT the stock
+   Tailwind green/yellow/red-500 hexes). Data figures render in the mono
+   face with tabular numerals; uppercase is reserved for one label tier
+   (nav categories, table headers, card labels). Matches the restyled
+   Nexus Dashboard (182eb20). */
 :root {
-  --bg: #1c1e22;
-  --sidebar-bg: #24262b;
-  --card-bg: #2a2d33;
-  --border: #7a4a22;
-  --border-soft: #3a3d43;
-  --text: #d6d8dc;
-  --text-muted: #9aa0a8;
+  --bg: #1b1c1e;
+  --sidebar-bg: #212225;
+  --card-bg: #242528;
+  --border: #3a3833;
+  --border-soft: #2f2e2b;
+  --text: #d8d4cc;
+  --text-muted: #8f8b82;
   --primary: #c1550f;
   --primary-hover: #d96a1e;
-  --green: #22c55e;
-  --yellow: #eab308;
-  --red: #ef4444;
-  --radius: 8px;
+  --green: #82a35c;
+  --yellow: #d09c3c;
+  --red: #cf545e;
+  --radius: 2px;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 }
 /* Light theme — opt-in via html.theme-light (set from localStorage before paint,
-   toggled in the sidebar footer). Only the palette changes; layout is shared. */
+   toggled on the Settings page). Only the palette changes; layout is shared. */
 html.theme-light {
-  --bg: #f2f1ef;
-  --sidebar-bg: #ffffff;
-  --card-bg: #ffffff;
-  --border: #c98a5b;
-  --border-soft: #ddd8d2;
-  --text: #26221e;
-  --text-muted: #6b655e;
-  --primary: #b34d0c;
-  --primary-hover: #983f08;
-  --green: #16a34a;
-  --yellow: #ca8a04;
-  --red: #dc2626;
+  --bg: #efece6;
+  --sidebar-bg: #f9f7f3;
+  --card-bg: #f9f7f3;
+  --border: #d5cfc4;
+  --border-soft: #e3ded5;
+  --text: #2b2721;
+  --text-muted: #767061;
+  --primary: #a84a0c;
+  --primary-hover: #8f3d08;
+  --green: #5f7d3d;
+  --yellow: #96701d;
+  --red: #a83440;
 }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -42,53 +47,51 @@ body {
   min-height: 100vh;
 }
 a { color: var(--primary); text-decoration: none; }
+a:focus-visible, .btn:focus-visible, .modal-close:focus-visible {
+  outline: 2px solid var(--primary); outline-offset: 1px;
+}
 
 /* ─── Sidebar ─────────────────────────── */
 .sidebar {
-  width: 240px;
+  width: 224px;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
 }
-.sidebar-header {
-  padding: 18px 16px 14px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 10px;
-}
+.sidebar-header { padding: 16px 16px 13px; border-bottom: 1px solid var(--border); }
 .sidebar-brand { min-width: 0; }
-.sidebar-header h1 { font-size: 15px; font-weight: 700; line-height: 1.15;
+.sidebar-header h1 { font-size: 13.5px; font-weight: 700; line-height: 1.2; letter-spacing: 0.01em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subtitle { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-.nav-list { list-style: none; padding: 8px 0; flex: 1; }
-.nav-list li { margin: 1px 0; }
+/* Subtitle: static app descriptor (no live status here, unlike DNSMAQ-MGR). */
+.subtitle { font-size: 11px; color: var(--text-muted); margin-top: 3px;
+  font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtitle strong { color: var(--primary); font-weight: 600; }
+.nav-list { list-style: none; padding: 6px 0; flex: 1; }
+.nav-list li { margin: 0; }
 .nav-list a {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 20px;
+  gap: 9px;
+  padding: 6px 16px;
   color: var(--text-muted);
-  font-size: 14px;
-  transition: all 0.15s;
-  border-left: 3px solid transparent;
+  font-size: 12.5px;
+  transition: color 0.15s, background 0.15s;
+  border-left: 2px solid transparent;
 }
-.nav-list a:hover { color: var(--text); background: rgba(255,255,255,0.04); }
-.nav-list a.active { color: var(--primary); background: rgba(193,85,15,0.12); border-left-color: var(--primary); }
-/* Stroke icon system — replaces the OS color-emoji glyphs. Class-scoped so
-   generated SVGs (sparklines) keep their own stroke rules. currentColor is
-   the point: icons sit muted like their labels and go orange on the active
-   row, in both themes, with no per-theme work. */
+.nav-list a:hover { color: var(--text); }
+.nav-list a.active { color: var(--text); background: rgba(255,255,255,0.04); border-left-color: var(--primary); }
+html.theme-light .nav-list a.active { background: rgba(0,0,0,0.05); }
+/* Stroke icon system — replaces the OS color-emoji glyphs (same set as
+   Nexus IPAM). Class-scoped so generated SVGs (sparklines) keep their own
+   stroke rules; currentColor makes icons follow text colour in both themes. */
 .ico {
-  width: 16px; height: 16px; flex-shrink: 0;
+  width: 15px; height: 15px; flex-shrink: 0; vertical-align: -3px;
   stroke: currentColor; stroke-width: 2;
   stroke-linecap: round; stroke-linejoin: round; fill: none;
 }
-.card-head .ico { width: 13px; height: 13px; }
-.sidebar-mark {
-  width: 28px; height: 28px; border-radius: 7px; background: var(--primary);
-  color: #fff; display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-}
+.ico-sm { width: 12px; height: 12px; vertical-align: -2px; }
 
 /* Read-only role: hide create toolbars, destructive buttons, and admin-only nav
    items (server also enforces 403). */
@@ -101,30 +104,32 @@ body.readonly .nav-admin-only { display: none !important; }
 .nav-list li.module-hidden { display: none !important; }
 .nav-list li.nav-group.group-hidden { display: none !important; }
 
-/* Checkbox multi-select list (disk/PV/backstore pickers) */
+/* Checkbox multi-select list */
 .checklist {
   max-height: 190px; overflow-y: auto;
-  border: 1px solid var(--border-soft); border-radius: 6px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius);
   background: rgba(0,0,0,0.18); padding: 4px;
 }
+html.theme-light .checklist { background: rgba(0,0,0,0.04); }
 .checkitem {
   display: flex; align-items: center; gap: 9px;
-  padding: 6px 9px; border-radius: 4px; cursor: pointer;
-  font-size: 14px; user-select: none;
+  padding: 5px 9px; border-radius: 1px; cursor: pointer;
+  font-size: 13px; user-select: none;
 }
 .checkitem:hover { background: rgba(255,255,255,0.05); }
-.checkitem input { margin: 0; width: 16px; height: 16px; flex-shrink: 0; }
+html.theme-light .checkitem:hover { background: rgba(0,0,0,0.05); }
+.checkitem input { margin: 0; width: 15px; height: 15px; flex-shrink: 0; }
 
-/* Toggle switch (used on the Modules page) */
-.switch { position: relative; display: inline-block; width: 42px; height: 24px; vertical-align: middle; }
+/* Toggle switch */
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; vertical-align: middle; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .slider {
   position: absolute; cursor: pointer; inset: 0;
-  background: var(--border); border-radius: 24px; transition: background 0.15s;
+  background: var(--border); border-radius: 2px; transition: background 0.15s;
 }
 .switch .slider::before {
-  content: ''; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px;
-  background: #fff; border-radius: 50%; transition: transform 0.15s;
+  content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+  background: #fff; border-radius: 1px; transition: transform 0.15s;
 }
 .switch input:checked + .slider { background: var(--green); }
 .switch input:checked + .slider::before { transform: translateX(18px); }
@@ -133,128 +138,177 @@ body.readonly .nav-admin-only { display: none !important; }
 /* Collapsible nav categories */
 .nav-cat {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 20px 4px; margin-top: 4px;
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px;
+  padding: 13px 16px 4px; margin-top: 2px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--text-muted); cursor: pointer; user-select: none;
 }
 .nav-cat:hover { color: var(--text); }
 .nav-cat .caret { font-size: 10px; transition: transform 0.15s; }
 .nav-sub { list-style: none; }
-.nav-sub a { padding-left: 28px; }
+.nav-sub a { padding-left: 24px; }
 .nav-group.collapsed .nav-sub { display: none; }
 .nav-group.collapsed .nav-cat .caret { transform: rotate(-90deg); }
 .sidebar-footer {
-  padding: 16px 20px;
+  padding: 14px 16px;
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.status-dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.status-dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.status-dot { width: 7px; height: 7px; border-radius: 1px; display: inline-block; }
+.status-dot.green { background: var(--green); }
+.status-dot.red { background: var(--red); }
 
 /* ─── Content ─────────────────────────── */
-.content { flex: 1; padding: 32px 40px; overflow-y: auto; max-height: 100vh; }
-.content h2 { font-size: 24px; font-weight: 700; margin-bottom: 20px; color: var(--primary); }
-.content h3 { font-size: 18px; font-weight: 600; margin: 24px 0 12px; color: var(--primary); }
-.content h4 { font-size: 15px; font-weight: 600; margin: 12px 0 8px; }
+.content { flex: 1; padding: 22px 28px; overflow-y: auto; max-height: 100vh; }
+.content h2 { font-size: 18px; font-weight: 700; margin-bottom: 16px; letter-spacing: 0.01em; }
+.content h3, .modal-body h3 {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted); margin: 24px 0 10px;
+}
+.content h3::after, .modal-body h3::after { content: ''; flex: 1; border-top: 1px solid var(--border-soft); }
+.content h4 { font-size: 14px; font-weight: 600; margin: 12px 0 8px; }
 
-/* ─── Cards ───────────────────────────── */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 20px; }
+/* ─── Cards ───────────────────────────────
+   .cards / .card-grid join their cards into one ruled strip: a 1px flex gap
+   over the border-colored container background draws the hairline dividers,
+   and flex rows always fill the row so no empty grid cell shows through. */
+.cards, .card-grid {
+  display: flex; flex-wrap: wrap; gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.card-grid { margin: 16px 0 8px; }
+.cards > .card, .card-grid > .card {
+  flex: 1 1 190px;
+  border: none; border-radius: 0; margin: 0;
+  /* Cards holding unbreakable strings (long domains in the Query Log top
+     tables) must be allowed to shrink instead of overflowing neighbors. */
+  min-width: 0;
+}
+.card .table td { overflow-wrap: anywhere; }
 .card {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px;
-  text-align: center;
+  padding: 12px 14px;
+  text-align: left;
 }
-.card-value { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
-.card-label { font-size: 13px; color: var(--text-muted); }
+.card-value {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 20px; font-weight: 500; margin: 3px 0 2px; line-height: 1.25;
+}
+.card-label { font-size: 11px; color: var(--text-muted); }
 .info-row {
-  display: flex; gap: 24px; padding: 12px 16px;
+  display: flex; gap: 20px; flex-wrap: wrap; padding: 8px 14px;
   background: var(--card-bg); border: 1px solid var(--border);
-  border-radius: var(--radius); font-size: 14px; margin-bottom: 20px;
+  border-radius: var(--radius); margin-bottom: 20px;
+  font-family: var(--mono); font-size: 12px;
 }
 
 /* ─── Tables ──────────────────────────── */
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 13px;
 }
 .table thead th {
   text-align: left;
-  padding: 10px 12px;
-  border-bottom: 2px solid var(--border);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
   color: var(--text-muted);
   font-weight: 600;
-  font-size: 12px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.07em;
 }
 .table tbody td {
-  padding: 10px 12px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border-soft);
   vertical-align: middle;
 }
 .table tbody tr:hover { background: rgba(255,255,255,0.02); }
+html.theme-light .table tbody tr:hover { background: rgba(0,0,0,0.025); }
 
 /* ─── Buttons ─────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 16px;
+  padding: 6px 13px;
   background: var(--primary);
   color: #fff;
   border: none;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, border-color 0.15s;
 }
 .btn:hover { background: var(--primary-hover); }
-.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-sm { padding: 4px 9px; font-size: 11.5px; }
 .btn-outline {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text);
 }
-.btn-outline:hover { background: rgba(255,255,255,0.05); }
+.btn-outline:hover { background: transparent; border-color: var(--text-muted); }
 /* Destructive actions carry the app orange, not alarm red — every delete is
    already confirm()-guarded, so the color doesn't need to scream. */
 .btn-danger { background: var(--primary); }
 .btn-danger:hover { background: var(--primary-hover); }
-.btn-warning { background: var(--yellow); color: #000; }
-.btn-warning:hover { background: #d97706; }
-.toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-
-/* ─── Status Badges ───────────────────── */
-.status-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
+.btn-warning { background: var(--yellow); color: #1b1c1e; }
+.btn-warning:hover { background: #b8862f; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+/* In-table row actions read as quiet ghost controls — a table full of solid
+   primary buttons is exactly the wall-of-accent the restyle removes. */
+.table .btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text); font-weight: 500;
 }
-.status-badge.green { background: rgba(34,197,94,0.2); color: var(--green); }
-.status-badge.yellow { background: rgba(234,179,8,0.2); color: var(--yellow); }
-.status-badge.red { background: rgba(239,68,68,0.2); color: var(--red); }
-.status-badge.gray { background: rgba(139,149,165,0.2); color: var(--text-muted); }
+.table .btn:hover { background: transparent; border-color: var(--text-muted); }
+.table .btn-danger { color: var(--red); }
+.table .btn-warning { color: var(--yellow); }
+.table .btn-success { color: var(--green); }
+
+/* ─── Status badges ───────────────────────
+   A square swatch + lowercase mono text. No tinted pill, no glow;
+   "gray" (off/neutral) gets an outline-only swatch. */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+.status-badge::before {
+  content: ''; width: 8px; height: 8px; border-radius: 1px;
+  background: currentColor; flex-shrink: 0;
+}
+.status-badge.green { color: var(--green); }
+.status-badge.yellow { color: var(--yellow); }
+.status-badge.red { color: var(--red); }
+.status-badge.gray { color: var(--text-muted); }
+.status-badge.gray::before { background: transparent; border: 1px solid currentColor; }
 
 /* ─── Pool Cards ──────────────────────── */
 .pool-card {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
 }
 .pool-header {
   display: flex;
@@ -262,23 +316,23 @@ body.readonly .nav-admin-only { display: none !important; }
   gap: 12px;
   flex-wrap: wrap;
 }
-.pool-name { font-size: 18px; }
-.pool-stats { color: var(--text-muted); font-size: 13px; margin-right: auto; }
-.pool-status { font-size: 13px; color: var(--text-muted); margin-top: 8px; }
-.pool-scan { font-size: 13px; color: var(--text-muted); }
-.zfs-vdev { font-family: 'Courier New', monospace; font-size: 12px; color: var(--text-muted); padding: 2px 0 2px 16px; }
+.pool-name { font-size: 15px; font-family: var(--mono); }
+.pool-stats { color: var(--text-muted); font-size: 12px; font-family: var(--mono); margin-right: auto; }
+.pool-status { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
+.pool-scan { font-size: 12.5px; color: var(--text-muted); }
+.zfs-vdev { font-family: var(--mono); font-size: 12px; color: var(--text-muted); padding: 2px 0 2px 16px; }
 
 /* ─── Form ────────────────────────────── */
 .form-group { margin-bottom: 12px; }
-.form-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: var(--text-muted); }
+.form-group label { display: block; font-size: 12.5px; font-weight: 500; margin-bottom: 4px; color: var(--text-muted); }
 .form-control {
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text);
-  font-size: 14px;
+  font-size: 13.5px;
 }
 .form-control:focus { outline: none; border-color: var(--primary); }
 select.form-control { cursor: pointer; }
@@ -298,60 +352,69 @@ select.form-control[multiple] { min-height: 120px; }
 .modal {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 3px;
   width: 90%;
   max-width: 640px;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  /* Clip to the rounded box so wide content can never spill out and push a
+  /* Clip to the box so wide content can never spill out and push a
      page-level horizontal scrollbar — any overflow is contained in the body. */
   overflow: hidden;
 }
-/* Wide variant for device/dataset/property tables (ZFS / iSCSI / MD "Manage"). */
 .modal.wide { max-width: 1080px; width: 95%; }
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  padding: 13px 18px;
   border-bottom: 1px solid var(--border);
 }
-.modal-header h3 { font-size: 16px; margin: 0; }
+.modal-header h3 { font-size: 14px; font-weight: 600; margin: 0; }
 .modal-close {
   background: none;
   border: none;
   color: var(--text-muted);
-  font-size: 24px;
+  font-size: 22px;
   cursor: pointer;
   padding: 0 4px;
 }
 .modal-close:hover { color: var(--text); }
-/* Vertical scroll is fine; keep any horizontal scroll (very wide tables)
-   inside the body rather than on the whole page. */
-.modal-body { padding: 20px; overflow-y: auto; overflow-x: auto; }
+.modal-body { padding: 18px; overflow-y: auto; overflow-x: auto; }
 
 /* ─── Raw Output ──────────────────────── */
 .raw-output {
-  background: #0a0e14;
+  background: #131416;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px 16px;
-  font-family: 'Courier New', monospace;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: var(--mono);
   font-size: 12px;
   line-height: 1.5;
   overflow-x: auto;
   white-space: pre-wrap;
-  color: #c9d1d9;
+  color: #c6c2ba;
 }
 
-/* ─── Alerts ──────────────────────────── */
-.alert { padding: 12px 16px; border-radius: 6px; font-size: 14px; margin-bottom: 16px; }
-.alert-warning { background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.3); color: var(--yellow); }
-.alert-info { background: rgba(193,85,15,0.12); border: 1px solid rgba(193,85,15,0.35); color: var(--primary); }
+/* ─── Alerts ──────────────────────────────
+   Flat: hairline box, a 2px left tick in the semantic color, body text in
+   the normal text color (only the tick and lead-in carry the hue). */
+.alert {
+  padding: 10px 14px;
+  border: 1px solid var(--border-soft);
+  border-left-width: 2px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.alert-warning { border-left-color: var(--yellow); }
+.alert-warning strong { color: var(--yellow); }
+.alert-info { border-left-color: var(--primary); }
+.alert-info strong { color: var(--primary); }
+.alert-danger { border-left-color: var(--red); color: var(--red); }
 
 /* ─── Misc ────────────────────────────── */
-.loading { padding: 40px; text-align: center; color: var(--text-muted); }
+.loading { padding: 40px; text-align: center; color: var(--text-muted); font-family: var(--mono); font-size: 12px; }
 
 /* ─── Login ───────────────────────────── */
 #login-screen {
@@ -367,35 +430,40 @@ select.form-control[multiple] { min-height: 120px; }
   width: 320px;
   background: var(--sidebar-bg);
   border: 1px solid var(--border);
+  border-top: 2px solid var(--primary);
   border-radius: var(--radius);
-  padding: 32px;
+  padding: 28px;
 }
-.login-box h1 { font-size: 20px; font-weight: 700; }
+.login-box h1 { font-size: 16px; font-weight: 700; }
 .login-box .subtitle { margin: 4px 0 20px; }
 .login-box .btn { width: 100%; margin-top: 8px; justify-content: center; }
 .login-box .error { margin-bottom: 12px; }
 
 /* ─── Dashboard cards ─────────────────── */
-.card-head { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
-.card-link { cursor: pointer; transition: border-color 0.15s, transform 0.05s; }
-.card-link:hover { border-color: var(--primary); }
-.card-link:active { transform: translateY(1px); }
-.card-unit { font-size: 13px; color: var(--text-muted); font-weight: 400; }
-.card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.card-head, .card-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); margin-bottom: 2px;
+}
+.card-link { cursor: pointer; transition: background 0.15s; }
+.card-link:hover { background: rgba(255,255,255,0.03); }
+html.theme-light .card-link:hover { background: rgba(0,0,0,0.03); }
+.card-unit { font-size: 11px; color: var(--text-muted); font-weight: 400; font-family: var(--mono); }
+.card-sub { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-family: var(--mono); }
 .health-ok {
-  padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 14px;
-  background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3); color: var(--green);
+  padding: 8px 14px; border: 1px solid var(--border-soft); border-left: 2px solid var(--green);
+  border-radius: var(--radius); margin-bottom: 14px; font-size: 12.5px;
+  font-family: var(--mono); color: var(--green);
 }
 
 /* ─── Usage bars ──────────────────────── */
+.usage { display: flex; align-items: center; gap: 8px; margin: 7px 0 2px; }
 .usage-bar {
-  position: relative;
-  height: 21px;
+  flex: 1;
+  height: 5px;
   background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid var(--border-soft);
   overflow: hidden;
-  margin: 8px 0;
 }
 .usage-bar-fill { height: 100%; transition: width 0.3s ease; }
 /* Utilization is a quantity, not an alarm — fills stay in the app palette
@@ -403,54 +471,49 @@ select.form-control[multiple] { min-height: 120px; }
 .usage-bar-fill.green { background: #556b2f; }
 .usage-bar-fill.yellow { background: var(--yellow); }
 .usage-bar-fill.red { background: var(--primary); }
-.usage-bar-label {
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  text-align: center;
-  font-size: 11px;
-  line-height: 21px;
-  color: var(--text);
-  text-shadow: 0 0 2px rgba(0,0,0,0.6);
+.usage-pct {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 11px; color: var(--text-muted);
+  min-width: 34px; text-align: right;
 }
-.pool-errors { color: var(--red); margin: 4px 0; font-size: 13px; }
+.pool-errors { color: var(--red); margin: 4px 0; font-size: 12.5px; }
 
 textarea.form-control {
   width: 100%;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   resize: vertical;
 }
 
 /* ─── Sidebar footer account ──────────── */
 .footer-status { display: flex; align-items: center; }
-.footer-account { margin-top: 10px; font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
-.footer-account a { font-size: 12px; }
-.error { padding: 20px; background: rgba(239,68,68,0.1); border: 1px solid var(--red); border-radius: 6px; }
+.footer-account { margin-top: 10px; font-size: 11.5px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.footer-account a { font-size: 11.5px; }
+.error { padding: 14px; border: 1px solid var(--border-soft); border-left: 2px solid var(--red); border-radius: var(--radius); color: var(--red); font-size: 13px; }
 .log-view {
   background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px; margin-top: 12px; max-height: 65vh; overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word;
 }
-.spark { display: block; margin: 4px auto 0; opacity: 0.85; max-width: 100%; }
+.spark { display: block; margin: 4px 0 0; opacity: 0.85; max-width: 100%; }
 .spark svg { display: block; }
 .pool-stats .fc-up { color: var(--red); }
 .pool-stats .fc-flat { color: var(--text-muted); }
 
 
-/* ─── Containers pages (ported from LXD-Console) ───────────── */
+/* ─── Misc page furniture ───────────── */
 .console-term { width: 100%; height: 60vh; background: #000; padding: 4px; }
-.badge-type { font-size: 11px; padding: 1px 6px; border-radius: 4px;
-  background: var(--border-soft); margin-left: 4px; }
+.badge-type { font-size: 10.5px; font-family: var(--mono); padding: 1px 5px; border-radius: 1px;
+  border: 1px solid var(--border-soft); color: var(--text-muted); margin-left: 4px; }
 .img-filter { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
 .img-filter .form-group { margin: 0; }
-.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; margin: 16px 0 8px; }
-.card .big { font-size: 28px; font-weight: 700; margin: 6px 0 2px; }
+.mono { font-family: var(--mono); }
+.card .big { font-size: 20px; font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; margin: 5px 0 2px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 12px; }
 .page-header h2, .page-header h3 { margin: 0; }
+.page-header h3::after { display: none; }
 .btn-success { background: var(--green); color: #fff; }
-.alert-danger { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: var(--red); }
 
 /* ─── IPAM additions ───────────────────────────────────────
    Everything above is shared verbatim with DNSMAQ-MGR so the two apps are
@@ -458,22 +521,24 @@ textarea.form-control {
    the IP map grid, the network tree, and the state colour key. */
 
 /* Address state colours. Semantic, and reused by the map, the legend and the
-   badges so one state always reads the same way. */
+   badges so one state always reads the same way. Tuned to the restyled
+   palette (olive/amber/brick) with a desaturated steel blue for DHCP pools —
+   NOT the old Tailwind green/yellow/sky/red hexes. */
 :root {
-  --st-free: #3a3d43;
-  --st-active: #22c55e;
-  --st-reserved: #eab308;
-  --st-pool: #38bdf8;
-  --st-deprecated: #6b7280;
-  --st-unmanaged: #ef4444;
+  --st-free: #2f2e2b;
+  --st-active: #82a35c;
+  --st-reserved: #d09c3c;
+  --st-pool: #5f93ad;
+  --st-deprecated: #6f6b64;
+  --st-unmanaged: #cf545e;
 }
 html.theme-light {
-  --st-free: #ddd8d2;
-  --st-active: #16a34a;
-  --st-reserved: #ca8a04;
-  --st-pool: #0284c7;
-  --st-deprecated: #9ca3af;
-  --st-unmanaged: #dc2626;
+  --st-free: #e3ded5;
+  --st-active: #5f7d3d;
+  --st-reserved: #96701d;
+  --st-pool: #33708f;
+  --st-deprecated: #9c968a;
+  --st-unmanaged: #a83440;
 }
 
 /* ─── IP map ──────────────────────────────────────────────
@@ -482,46 +547,47 @@ html.theme-light {
 .ip-map {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(58px, 1fr));
-  gap: 3px;
+  gap: 2px;
   margin: 12px 0 4px;
 }
 .ip-cell {
   position: relative;
   padding: 5px 2px;
-  border-radius: 4px;
+  border-radius: 1px;
   font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   text-align: center;
   cursor: pointer;
   border: 1px solid transparent;
   color: var(--text);
   background: var(--st-free);
-  transition: transform 0.05s, border-color 0.15s;
+  transition: border-color 0.15s;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ip-cell:hover { border-color: var(--primary); transform: translateY(-1px); }
-.ip-cell.active { background: var(--st-active); color: #06240f; }
-.ip-cell.reserved { background: var(--st-reserved); color: #2b2100; }
-.ip-cell.dhcp, .ip-cell.pool { background: var(--st-pool); color: #052436; }
-.ip-cell.deprecated { background: var(--st-deprecated); color: #111; }
+.ip-cell:hover { border-color: var(--primary); }
+.ip-cell.active { background: var(--st-active); color: #1a2210; }
+.ip-cell.reserved { background: var(--st-reserved); color: #291f05; }
+.ip-cell.dhcp, .ip-cell.pool { background: var(--st-pool); color: #0e2531; }
+.ip-cell.deprecated { background: var(--st-deprecated); color: #16140f; }
 .ip-cell.unmanaged { background: var(--st-unmanaged); color: #fff; }
 .ip-cell.gw::after {
   content: '\2691';                 /* flag — marks the declared gateway */
   position: absolute; top: 0; right: 2px; font-size: 9px; opacity: 0.9;
 }
-.ip-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-muted); margin: 8px 0 16px; }
+.ip-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11.5px; font-family: var(--mono); color: var(--text-muted); margin: 8px 0 16px; }
 .ip-legend span { display: flex; align-items: center; gap: 5px; }
-.ip-legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.ip-legend i { width: 11px; height: 11px; border-radius: 1px; display: inline-block; }
 
 /* ─── Network tree ────────────────────────────────────────
    Depth is rendered with padding on the first cell so the table stays a
    plain table (sortable, copyable) instead of nested markup. */
 .tree-indent { display: inline-block; }
 .tree-branch { color: var(--text-muted); margin-right: 4px; }
-.cidr { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+.cidr { font-family: var(--mono); font-weight: 600; }
 .util-cell { min-width: 150px; }
-.util-cell .usage-bar { margin: 0; }
+.util-cell .usage { margin: 0; }
 
 /* Bulk-select column: tick boxes stay narrow and on-theme */
 .table .sel-cell { width: 30px; text-align: center; }
@@ -532,36 +598,38 @@ input[type="checkbox"] { accent-color: var(--primary); }
 .th-sort:hover { color: var(--primary); }
 .pager {
   display: flex; align-items: center; justify-content: flex-end;
-  gap: 12px; margin: 12px 0; font-size: 13px; color: var(--text-muted);
+  gap: 12px; margin: 12px 0; font-size: 12.5px; font-family: var(--mono);
+  font-variant-numeric: tabular-nums; color: var(--text-muted);
 }
 
 /* Compact bar for table rows */
-.usage-bar.sm { height: 17px; }
-.usage-bar.sm .usage-bar-label { line-height: 17px; font-size: 10px; }
+.usage.sm { margin: 0; gap: 6px; }
+.usage.sm .usage-bar { height: 4px; }
+.usage.sm .usage-pct { font-size: 10px; min-width: 30px; }
 
 /* ─── Detail layout ───────────────────────────────────────*/
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 12px 24px;
+  gap: 10px 22px;
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 20px;
+  padding: 14px 16px;
   margin-bottom: 20px;
-  font-size: 14px;
+  font-size: 13px;
 }
-.detail-grid dt { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+.detail-grid dt { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 2px; }
 .detail-grid dd { margin: 0 0 4px; word-break: break-word; }
 
-.crumb { font-size: 13px; color: var(--text-muted); margin-bottom: 10px; }
+.crumb { font-size: 12.5px; color: var(--text-muted); margin-bottom: 10px; }
 .crumb a { cursor: pointer; }
 .crumb .sep { margin: 0 6px; opacity: 0.6; }
 
 /* ─── Topology tree ───────────────────────────────────────*/
 .topo { list-style: none; margin: 0; padding-left: 0; }
 .topo ul { list-style: none; padding-left: 22px; border-left: 1px solid var(--border-soft); margin-left: 8px; }
-.topo li { padding: 3px 0; font-size: 14px; }
+.topo li { padding: 3px 0; font-size: 13px; }
 .topo .node { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .topo .node a { cursor: pointer; }
 .topo .meta { font-size: 12px; color: var(--text-muted); }
@@ -573,9 +641,10 @@ input[type="checkbox"] { accent-color: var(--primary); }
 .filters .grow { flex: 1; min-width: 220px; }
 
 /* ─── Global search results ───────────────────────────────*/
-.search-hit { padding: 8px 12px; border-bottom: 1px solid var(--border-soft); cursor: pointer; font-size: 14px; }
+.search-hit { padding: 8px 12px; border-bottom: 1px solid var(--border-soft); cursor: pointer; font-size: 13px; }
 .search-hit:hover { background: rgba(255,255,255,0.04); }
-.search-hit .kind { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; margin-right: 8px; }
+html.theme-light .search-hit:hover { background: rgba(0,0,0,0.04); }
+.search-hit .kind { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.07em; margin-right: 8px; }
 
 /* Right-aligned numeric columns read much faster in a utilization table. */
 .num { text-align: right; font-variant-numeric: tabular-nums; }

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nexus IPAM</title>
-<meta name="theme-color" content="#1c1e22">
+<meta name="theme-color" content="#1b1c1e">
 <link rel="stylesheet" href="/static/css/style.css">
 <script>try { if (localStorage.getItem('theme') === 'light') document.documentElement.classList.add('theme-light'); } catch (e) {}</script>
 </head>
@@ -33,7 +33,6 @@
 </defs></svg>
 <div id="login-screen" style="display:none">
   <form class="login-box" onsubmit="doLogin(event)">
-    <div class="sidebar-mark" style="margin-bottom:12px"><svg class="ico"><use href="#i-net"/></svg></div>
     <h1>Nexus IPAM</h1>
     <p class="subtitle">IP address management &middot; sign in to continue</p>
     <div class="form-group"><label>Username</label><input id="login-user" class="form-control" autocomplete="username"></div>
@@ -44,7 +43,6 @@
 </div>
 <nav class="sidebar">
   <div class="sidebar-header">
-    <div class="sidebar-mark"><svg class="ico"><use href="#i-net"/></svg></div>
     <div class="sidebar-brand">
       <h1 id="sidebar-title">Nexus IPAM</h1>
       <p class="subtitle">IP address management</p>
@@ -82,14 +80,13 @@
     </li>
 
     <li><a href="#" data-page="scan"><svg class="ico"><use href="#i-rad"/></svg> Scan &amp; Verify</a></li>
-    <li class="nav-admin-only"><a href="#" data-page="settings"><svg class="ico"><use href="#i-sli"/></svg> Settings</a></li>
+    <li><a href="#" data-page="settings"><svg class="ico"><use href="#i-sli"/></svg> Settings</a></li>
   </ul>
   <div class="sidebar-footer">
     <div class="footer-account">
       <span id="account-user"></span>
       <a href="#" onclick="changePassword(event)">Password</a>
       <a href="#" onclick="doLogout(event)">Sign out</a>
-      <a href="#" onclick="toggleTheme(event)"><span id="theme-label">Light theme</span></a>
     </div>
   </div>
 </nav>
