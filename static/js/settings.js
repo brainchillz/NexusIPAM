@@ -2,7 +2,7 @@
 // and the audit log.
 
 async function page_settings() {
-  const [users, tokens, tls, health, version, banner, sync] = await Promise.all([
+  const [users, tokens, tls, health, version, banner, sync, push] = await Promise.all([
     API.get('/api/users').catch(() => []),
     API.get('/api/tokens').catch(() => []),
     API.get('/api/tls/info').catch(() => ({present: false})),
@@ -10,6 +10,7 @@ async function page_settings() {
     API.get('/api/version').catch(() => ({})),
     API.get('/api/settings/banner').catch(() => ({banner: ''})),
     API.get('/api/sync').catch(() => null),
+    API.get('/api/push').catch(() => null),
   ]);
 
   $('page-content').innerHTML = `
@@ -42,6 +43,29 @@ async function page_settings() {
       {label: '', get: r => r.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'},
       {label: 'Detail', get: r => escapeHtml(r.detail || '')},
     ], sync.runs.slice(0, 10), '')}` : ''}` : ''}
+
+    ${push ? `
+    <h3 style="margin-top:24px">DNS push targets</h3>
+    <p class="help">Pushes the address plan's names to DNSMAQ-MGR nodes via their mirror-receive
+      endpoint — the pushed section locks read-only on the node, making this IPAM the single writer.
+      Currently <strong>${push.record_count}</strong> host record(s) across ${push.address_count} address(es)
+      would be pushed (serial ${push.serial}).</p>
+    <div class="toolbar">
+      <button class="btn btn-sm" onclick="pushTargetModal()">+ Add target</button>
+      ${(push.targets || []).length ? `<button class="btn btn-sm" onclick="pushRunNow(this)">Push now</button>
+      <a class="btn btn-sm btn-outline" href="/api/push/preview" target="_blank">Preview payload</a>` : ''}
+    </div>
+    ${dataTable([
+      {label: 'Target', get: t => `<strong>${escapeHtml(t.name)}</strong><br><span class="muted">${escapeHtml(t.url || '')}</span>`},
+      {label: 'Enabled', get: t => t.enabled ? '<span class="status-badge green">yes</span>' : '<span class="status-badge gray">no</span>'},
+      {label: 'Last push', get: t => t.last
+        ? `${t.last.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'}
+           <span class="muted">${fmtTs(t.last.ts)} · serial ${t.last.serial} · ${escapeHtml(t.last.detail || '')}</span>`
+        : '<span class="muted">never</span>'},
+      {label: '', cls: 'row-actions', get: t => `
+        <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
+        <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}')">Remove</button>`},
+    ], push.targets || [], 'No push targets — this IPAM is not yet writing DNS anywhere')}` : ''}
 
     <h3 style="margin-top:24px">Sidebar banner</h3>
     <p class="help">Shown in the top-left corner in place of the host name.
@@ -327,4 +351,46 @@ async function showAudit() {
     {label: 'Object', get: a => escapeHtml(a.object_kind)},
     {label: 'Detail', get: a => escapeHtml(a.detail)},
   ], d.audit, 'Nothing recorded yet'), {wide: true});
+}
+
+// ─── DNS push targets ───────────────────────────────────
+function pushTargetModal() {
+  openModal('Add DNS push target', `
+    <div class="form-group"><label>Name</label>
+      <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"></div>
+    <div class="form-group"><label>URL (DNSMAQ-MGR base)</label>
+      <input id="pt-url" class="form-control" placeholder="https://dns-node:8443" spellcheck="false"></div>
+    <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
+      <input id="pt-token" class="form-control" placeholder="dmm_…" spellcheck="false"></div>
+    <p class="help">The node must have "accept mirrored config" enabled. The pushed hosts section
+      becomes read-only there; "Detach" on its Mirroring page hands control back at any time.</p>
+    <button class="btn" onclick="pushTargetSave()">Add target</button>`);
+}
+
+async function pushTargetSave() {
+  const body = {
+    name: $('pt-name').value.trim(),
+    url: $('pt-url').value.trim(),
+    token: $('pt-token').value.trim(),
+  };
+  try {
+    await API.post('/api/push/targets', body);
+    closeModal(); page_settings();
+  } catch (e) { alert(e.message); }
+}
+
+async function pushTargetDelete(name) {
+  if (!confirm(`Remove push target "${name}"? The node keeps its current records but stops receiving updates (detach the section there to unlock local editing).`)) return;
+  try { await API.delete('/api/push/targets/' + encodeURIComponent(name)); page_settings(); }
+  catch (e) { alert(e.message); }
+}
+
+async function pushRunNow(btn, target) {
+  btn.disabled = true; btn.textContent = 'Pushing…';
+  try {
+    const r = await API.post('/api/push/run' + (target ? '?target=' + encodeURIComponent(target) : ''), {});
+    alert(r.results.map(x => `${x.name}: ${x.ok ? 'ok — ' : 'FAILED — '}${x.detail}`).join('\n')
+          + `\n\n${r.records} record(s), serial ${r.serial}`);
+  } catch (e) { alert(e.message); }
+  page_settings();
 }

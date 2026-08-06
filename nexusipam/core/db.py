@@ -38,7 +38,7 @@ _local = threading.local()
 # sequences from interleaving.
 WRITE_LOCK = threading.RLock()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Objects an IP address can be assigned to. Polymorphic by design — a SQL FK
 # cannot point at four tables — so the app layer validates the target exists
@@ -207,6 +207,28 @@ CREATE INDEX IF NOT EXISTS ix_ip_network ON ip_addresses(network_id);
 CREATE INDEX IF NOT EXISTS ix_ip_assigned ON ip_addresses(assigned_kind, assigned_id);
 CREATE INDEX IF NOT EXISTS ix_ip_updated ON ip_addresses(updated);
 
+-- One IP carrying several names is a first-class shape (deliberate parallel
+-- A records), not an anomaly. Ordered: position 0 is the canonical name —
+-- it drives the PTR answer on the DNS side and the dns_name cache column on
+-- ip_addresses. rtype distinguishes a parallel A/AAAA record from a CNAME;
+-- per-name ext_id preserves the DNS server's own record id so a push
+-- round-trips identically. The same name MAY appear on several addresses
+-- (DNS round-robin), hence uniqueness is per address only.
+CREATE TABLE IF NOT EXISTS ip_names (
+  id          INTEGER PRIMARY KEY,
+  address_id  INTEGER NOT NULL REFERENCES ip_addresses(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  position    INTEGER NOT NULL DEFAULT 0,
+  rtype       TEXT NOT NULL DEFAULT 'a',      -- a | cname
+  comment     TEXT NOT NULL DEFAULT '',
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  ext_id      TEXT NOT NULL DEFAULT '',
+  created     INTEGER NOT NULL DEFAULT 0,
+  updated     INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (address_id, name)
+);
+CREATE INDEX IF NOT EXISTS ix_names_addr ON ip_names(address_id, position);
+
 -- ─── Services ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS dhcp_servers (
   id          INTEGER PRIMARY KEY,
@@ -335,10 +357,43 @@ def _migrate(conn):
             conn.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, column, decl))
 
 
+def _migrate_names(conn):
+    """v2 → v3: lift the dns_name column and the importers' meta.aliases blobs
+    into ip_names rows (canonical first, aliases in stored order). Runs once —
+    guarded by schema_version, and per-row idempotent anyway (INSERT OR IGNORE
+    + UNIQUE(address_id, name))."""
+    ts = int(time.time())
+    for r in conn.execute('SELECT id, dns_name, meta FROM ip_addresses').fetchall():
+        names = []
+        if (r['dns_name'] or '').strip():
+            names.append(r['dns_name'].strip())
+        try:
+            aliases = json.loads(r['meta'] or '{}').get('aliases') or []
+        except ValueError:
+            aliases = []
+        names += [str(a).strip() for a in aliases if str(a).strip()]
+        seen = set()
+        pos = 0
+        for name in names:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            conn.execute('INSERT OR IGNORE INTO ip_names(address_id,name,position,'
+                         'rtype,created,updated) VALUES(?,?,?,?,?,?)',
+                         (r['id'], name, pos, 'a', ts, ts))
+            pos += 1
+
+
 def init_db():
     conn = connect()
+    prev = conn.execute("SELECT value FROM meta WHERE key='schema_version'"
+                        ).fetchone() if conn.execute(
+        "SELECT name FROM sqlite_master WHERE name='meta'").fetchone() else None
     conn.executescript(SCHEMA)
     _migrate(conn)
+    if prev is not None and int(prev[0]) < 3:
+        _migrate_names(conn)
     conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (str(SCHEMA_VERSION),))

@@ -1116,3 +1116,149 @@ def test_sync_report_requires_admin(client, monkeypatch):
                         lambda: {'admin': {'password': 'x', 'role': 'readonly'}})
     assert client.post('/api/sync/runs', json={'source': 'unifi'}).status_code == 403
     assert client.get('/api/sync').status_code == 200
+
+
+# ─── Names: ordered, canonical first (phase 2) ────────────────────────
+
+def _mk_addr(client, address, **kw):
+    r = client.post('/api/addresses', json={'address': address, **kw})
+    assert r.status_code == 200, r.json
+    return r.json['id']
+
+
+def test_names_ordered_and_cache_synced(client):
+    rid = _mk_addr(client, '10.20.0.5', dns_name='stor.lan')
+    # dns_name on create seeded the canonical row
+    names = client.get('/api/addresses/%d/names' % rid).json['names']
+    assert [n['name'] for n in names] == ['stor.lan']
+    # full ordered list, aliases with own comments/ids
+    r = client.post('/api/addresses/%d/names' % rid, json={'names': [
+        {'name': 'stor.lan', 'comment': 'the box', 'ext_id': 'h_abc123'},
+        {'name': 'nas.lan', 'comment': 'storage'},
+        {'name': 'media.lan', 'enabled': False},
+    ]})
+    assert r.json['success']
+    names = client.get('/api/addresses/%d/names' % rid).json['names']
+    assert [n['name'] for n in names] == ['stor.lan', 'nas.lan', 'media.lan']
+    assert names[0]['ext_id'] == 'h_abc123' and names[2]['enabled'] == 0
+    rec = client.get('/api/addresses/%d' % rid).json
+    assert rec['dns_name'] == 'stor.lan'
+    # reorder: canonical follows position 0
+    client.post('/api/addresses/%d/names' % rid,
+                json={'names': ['nas.lan', 'stor.lan']})
+    assert client.get('/api/addresses/%d' % rid).json['dns_name'] == 'nas.lan'
+    # disabled/cname rows never become the cache
+    client.post('/api/addresses/%d/names' % rid,
+                json={'names': [{'name': 'off.lan', 'enabled': False},
+                                {'name': 'real.lan'}]})
+    assert client.get('/api/addresses/%d' % rid).json['dns_name'] == 'real.lan'
+
+
+def test_names_validation(client):
+    rid = _mk_addr(client, '10.20.0.6')
+    bad = [
+        [{'name': 'not a name'}],
+        [{'name': 'a.lan'}, {'name': 'A.LAN'}],          # dup, case-insensitive
+        [{'name': 'x.lan', 'rtype': 'mx'}],
+        'not-a-list',
+    ]
+    for payload in bad:
+        assert client.post('/api/addresses/%d/names' % rid,
+                           json={'names': payload}).status_code == 400
+    assert client.post('/api/addresses/999999/names',
+                       json={'names': []}).status_code == 404
+
+
+def test_dns_name_edit_keeps_aliases(client):
+    """The address form only knows dns_name; editing it must never destroy
+    the deliberate parallel names."""
+    rid = _mk_addr(client, '10.20.0.7', dns_name='one.lan')
+    client.post('/api/addresses/%d/names' % rid,
+                json={'names': ['one.lan', 'two.lan', 'three.lan']})
+    # rename canonical via the plain address update
+    r = client.post('/api/addresses/%d' % rid, json={'dns_name': 'uno.lan'})
+    assert r.json['success']
+    names = [n['name'] for n in client.get('/api/addresses/%d/names' % rid).json['names']]
+    assert names == ['uno.lan', 'two.lan', 'three.lan']
+    # explicit empty clears the CANONICAL row only — aliases survive and the
+    # next name is promoted (single-name addresses clear fully, as ever).
+    client.post('/api/addresses/%d' % rid, json={'dns_name': ''})
+    names = [n['name'] for n in client.get('/api/addresses/%d/names' % rid).json['names']]
+    assert names == ['two.lan', 'three.lan']
+    assert client.get('/api/addresses/%d' % rid).json['dns_name'] == 'two.lan'
+
+
+def test_names_migration_lifts_meta_aliases(client):
+    from nexusipam.core import db
+    rid = _mk_addr(client, '10.20.0.8', dns_name='main.lan')
+    db.execute("UPDATE ip_addresses SET meta='{\"aliases\": [\"alias1.lan\", \"alias2.lan\"]}' "
+               'WHERE id=?', (rid,))
+    db.execute('DELETE FROM ip_names WHERE address_id=?', (rid,))
+    db._migrate_names(db.connect())
+    names = [n['name'] for n in client.get('/api/addresses/%d/names' % rid).json['names']]
+    assert names == ['main.lan', 'alias1.lan', 'alias2.lan']
+
+
+# ─── Push engine (phase 2) ────────────────────────────────────────────
+
+def test_push_payload_order_and_ids(client):
+    from nexusipam import pushout
+    a1 = _mk_addr(client, '10.30.0.2')
+    a2 = _mk_addr(client, '10.30.0.10')
+    client.post('/api/addresses/%d/names' % a2, json={'names': [
+        {'name': 'multi.lan', 'ext_id': 'h_9ff297', 'comment': 'canonical'},
+        {'name': 'alias.lan', 'ext_id': 'not-a-dnsmaq-id'},
+        {'name': 'off.lan', 'enabled': False},
+    ]})
+    client.post('/api/addresses/%d/names' % a1, json={'names': ['first.lan']})
+    recs = pushout.build_hosts()
+    assert [r['name'] for r in recs] == ['first.lan', 'multi.lan', 'alias.lan']
+    assert recs[1]['id'] == 'h_9ff297' and recs[1]['a'] == '10.30.0.10'
+    assert recs[1]['comment'] == 'canonical'
+    assert 'id' not in recs[2]              # malformed ext_id -> node assigns
+    assert all(r['aaaa'] == '' for r in recs)
+
+
+def test_push_targets_and_run(client, monkeypatch):
+    from nexusipam import pushout
+    assert client.post('/api/push/targets',
+                       json={'name': 'ns1', 'url': 'http://nope', 'token': 'x'}
+                       ).status_code == 400          # https only
+    assert client.post('/api/push/targets',
+                       json={'name': 'ns1', 'url': 'https://ns1:8443'}
+                       ).status_code == 400          # token required
+    r = client.post('/api/push/targets',
+                    json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_secret'})
+    assert r.json['success'] and r.json['target']['has_token']
+    assert 'token' not in r.json['target']
+    st = client.get('/api/push').json
+    assert st['targets'][0]['name'] == 'ns1' and 'token' not in st['targets'][0]
+
+    pushed = []
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, recs, serial: (pushed.append((t['name'], serial)),
+                                                 (True, 'applied via restart'))[1])
+    _mk_addr(client, '10.30.0.99', dns_name='pushme.lan')
+    r = client.post('/api/push/run')
+    assert r.json['success'] and r.json['serial'] == 1 and pushed == [('ns1', 1)]
+    r = client.post('/api/push/run')
+    assert r.json['serial'] == 2                     # monotonic
+    st = client.get('/api/push').json
+    assert st['targets'][0]['last']['ok'] and st['targets'][0]['serial'] == 2
+
+    assert client.delete('/api/push/targets/ns1').json['success']
+    assert client.post('/api/push/run').status_code == 400   # no targets left
+
+
+def test_push_failure_recorded(client, monkeypatch):
+    from nexusipam import pushout
+    client.post('/api/push/targets',
+                json={'name': 'ns2', 'url': 'https://ns2:9443', 'token': 'dmm_x'})
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, recs, serial: (False, 'Invalid mirror token'))
+    r = client.post('/api/push/run')
+    assert r.status_code == 200 and r.json['success'] is False
+    st = client.get('/api/push').json
+    t = st['targets'][0]
+    assert t['last']['ok'] is False and 'token' in t['last']['detail']
+    assert t['serial'] == 0                          # never acked anything

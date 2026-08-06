@@ -22,12 +22,12 @@ def create_app():
     db.init_db()
 
     from . import (networks, addresses, inventory, services, allocate, scan,
-                   exports, stats, sync)
+                   exports, stats, sync, pushout)
 
     app.before_request(auth.require_login)
 
     for mod in (auth, tls, networks, addresses, inventory, services, allocate,
-                scan, exports, stats, sync):
+                scan, exports, stats, sync, pushout):
         app.register_blueprint(mod.bp)
 
     @app.route('/')

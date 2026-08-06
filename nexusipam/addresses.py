@@ -102,13 +102,136 @@ LEFT JOIN vlans ON vlans.id = networks.vlan_id
 LEFT JOIN scan_results ON scan_results.address = ip_addresses.address
 """
 
+
+# ─── Names: ordered, canonical first ──────────────────────────────────
+# One IP carrying several names is by design (deliberate parallel A records —
+# see ip_names in core/db.py). `dns_name` on ip_addresses stays as a CACHE of
+# the canonical (position-0, enabled, A-type) name so every list, search and
+# importer keeps working; the ip_names table is the authority.
+
+NAME_TYPES = ('a', 'cname')
+
+
+def get_names(address_id):
+    return db.query('SELECT name, position, rtype, comment, enabled, ext_id '
+                    'FROM ip_names WHERE address_id=? ORDER BY position, id',
+                    (address_id,))
+
+
+def _canonical_of(address_id):
+    r = db.query_one("SELECT name FROM ip_names WHERE address_id=? AND enabled=1 "
+                     "AND rtype='a' ORDER BY position, id LIMIT 1", (address_id,))
+    return r['name'] if r else ''
+
+
+def set_names(address_id, items):
+    """Replace the full ordered name list for one address. Position is the
+    list order (0 = canonical — it drives the DNS side's PTR answer). Returns
+    (names, None) or (None, error)."""
+    if not isinstance(items, list):
+        return None, 'names must be a list'
+    if len(items) > 32:
+        return None, 'Too many names on one address (max 32)'
+    cleaned, seen = [], set()
+    for i, raw in enumerate(items):
+        if isinstance(raw, str):
+            raw = {'name': raw}
+        if not isinstance(raw, dict):
+            return None, 'names[%d] must be an object or string' % i
+        name = str(raw.get('name') or '').strip()
+        if not valid_fqdn(name):
+            return None, 'names[%d]: invalid DNS name %r' % (i, name)
+        if name.lower() in seen:
+            return None, 'names[%d]: duplicate name %s' % (i, name)
+        seen.add(name.lower())
+        rtype = str(raw.get('rtype') or 'a').lower()
+        if rtype not in NAME_TYPES:
+            return None, 'names[%d]: rtype must be one of %s' % (i, '/'.join(NAME_TYPES))
+        comment, e = clean_text(raw.get('comment'), 'names[%d] comment' % i, 200)
+        if e:
+            return None, e
+        ext_id = str(raw.get('ext_id') or '')[:32]
+        cleaned.append({'name': name, 'rtype': rtype, 'comment': comment,
+                        'enabled': 1 if raw.get('enabled', True) else 0,
+                        'ext_id': ext_id})
+    ts = db.now()
+    with db.WRITE_LOCK:
+        db.execute('DELETE FROM ip_names WHERE address_id=?', (address_id,))
+        for pos, n in enumerate(cleaned):
+            db.execute('INSERT INTO ip_names(address_id,name,position,rtype,comment,'
+                       'enabled,ext_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?)',
+                       (address_id, n['name'], pos, n['rtype'], n['comment'],
+                        n['enabled'], n['ext_id'], ts, ts))
+        db.execute('UPDATE ip_addresses SET dns_name=?, updated=? WHERE id=?',
+                   (_canonical_of(address_id), ts, address_id))
+    return get_names(address_id), None
+
+
+def _sync_canonical(action, rid, fields):
+    """on_change hook: keep ip_names coherent when the ordinary address form
+    (or an importer that only knows dns_name) writes through the resource API.
+    A dns_name edit renames/creates the canonical row. An explicit empty
+    clears the canonical row ONLY — deliberate aliases are never silently
+    destroyed; the next name in the list becomes canonical (with a single
+    name, clearing behaves exactly as it always has)."""
+    if action == 'delete':
+        return                                  # ON DELETE CASCADE handles rows
+    want = (fields.get('dns_name') or '').strip()
+    names = db.query('SELECT id, name, position FROM ip_names WHERE address_id=? '
+                     'ORDER BY position, id', (rid,))
+    ts = db.now()
+    if want:
+        if names:
+            head = names[0]
+            if head['name'].lower() != want.lower():
+                # Renaming the canonical: if the new name already exists as an
+                # alias, drop that alias row rather than colliding with it.
+                db.execute('DELETE FROM ip_names WHERE address_id=? AND name=? '
+                           'AND id<>?', (rid, want, head['id']))
+                db.execute('UPDATE ip_names SET name=?, updated=? WHERE id=?',
+                           (want, ts, head['id']))
+        else:
+            db.execute('INSERT INTO ip_names(address_id,name,position,rtype,'
+                       'created,updated) VALUES(?,?,0,?,?,?)',
+                       (rid, want, 'a', ts, ts))
+    elif names:
+        db.execute('DELETE FROM ip_names WHERE id=?', (names[0]['id'],))
+    cache = _canonical_of(rid)
+    if cache != want:
+        db.execute('UPDATE ip_addresses SET dns_name=? WHERE id=?', (cache, rid))
+
+
 register(Resource('addresses', 'ip_addresses', _v_address,
                   list_sql=ADDRESS_LIST_SQL,
                   get_sql=ADDRESS_LIST_SQL + ' WHERE ip_addresses.id=?',
                   order='ip_addresses.version, ip_addresses.addr_hex',
-                  label='address', singular='address'))
+                  label='address', singular='address',
+                  on_change=_sync_canonical))
 
 mount(bp, 'addresses')
+
+
+@bp.route('/api/addresses/<int:rid>/names')
+def address_names_get(rid):
+    if not db.query_one('SELECT id FROM ip_addresses WHERE id=?', (rid,)):
+        return err('No such address', 404)
+    return jsonify({'names': get_names(rid)})
+
+
+@bp.route('/api/addresses/<int:rid>/names', methods=['POST'])
+def address_names_set(rid):
+    rec = db.query_one('SELECT id, address FROM ip_addresses WHERE id=?', (rid,))
+    if not rec:
+        return err('No such address', 404)
+    data = request.get_json(silent=True)
+    items = data.get('names') if isinstance(data, dict) else data
+    names, e = set_names(rid, items)
+    if e:
+        return err(e)
+    db.audit(actor(), 'set-names', 'ip_addresses', rid,
+             '%s → %s' % (rec['address'],
+                          db.audit_list([n['name'] for n in names]) or '(none)'))
+    return jsonify({'success': True, 'names': names})
 
 
 @bp.route('/api/addresses/search')
@@ -183,6 +306,7 @@ def address_lookup():
     rec = db.row(ADDRESS_LIST_SQL + ' WHERE ip_addresses.address=?', (str(addr),))
     if rec:
         expand_assignment(rec)
+        rec['names'] = get_names(rec['id'])
 
     # Version + hex, across every network: with nested prefixes the covering
     # pool may be declared on a parent or a child of this address's own
@@ -261,10 +385,12 @@ def addresses_bulk():
                 continue
             if found:
                 db.update('ip_addresses', found['id'], fields)
+                _sync_canonical('update', found['id'], fields)
                 results['updated'] += 1
                 touched['updated'].append(fields['address'])
             else:
-                db.insert('ip_addresses', fields)
+                rid = db.insert('ip_addresses', fields)
+                _sync_canonical('create', rid, fields)
                 results['created'] += 1
                 touched['created'].append(fields['address'])
         parts = ['%s %s' % (what, db.audit_list(addrs))

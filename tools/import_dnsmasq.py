@@ -53,12 +53,12 @@ def request(url, token, method='GET', body=None, insecure=True):
 
 
 def group_by_address(hosts):
-    """{address: {'names': [...], 'ids': [...], 'version': 4|6}} from
-    DNSMAQ-MGR host records (each may carry an A and/or an AAAA)."""
+    """{address: {'entries': [{name,id,comment,enabled}], 'version': 4|6}}
+    from DNSMAQ-MGR host records (each may carry an A and/or an AAAA).
+    Disabled records are KEPT — lossless import means the enabled flag is
+    data, not a filter."""
     out = {}
     for h in hosts:
-        if not h.get('enabled', True):
-            continue
         name = (h.get('name') or '').strip().rstrip('.')
         if not name:
             continue
@@ -66,22 +66,24 @@ def group_by_address(hosts):
             addr = (h.get(field) or '').strip()
             if not addr:
                 continue
-            entry = out.setdefault(addr, {'names': [], 'ids': [], 'version': version})
-            if name not in entry['names']:
-                entry['names'].append(name)
-                entry['ids'].append(h.get('id', ''))
+            entry = out.setdefault(addr, {'entries': [], 'version': version})
+            if name not in [e['name'] for e in entry['entries']]:
+                entry['entries'].append({'name': name, 'id': h.get('id', ''),
+                                         'comment': h.get('comment', '') or '',
+                                         'enabled': bool(h.get('enabled', True))})
     return out
 
 
-def choose_primary(names, ptr):
-    """PTR match wins; otherwise the shortest name (then alphabetical, so the
-    result is stable across runs rather than dependent on dict order)."""
+def choose_primary(entries, ptr):
+    """PTR match wins; otherwise the shortest enabled name (then alphabetical,
+    so the result is stable across runs rather than dependent on dict order)."""
+    candidates = [e for e in entries if e['enabled']] or entries
     if ptr:
         ptr = ptr.rstrip('.')
-        for n in names:
-            if n == ptr:
-                return n
-    return sorted(names, key=lambda n: (len(n), n))[0]
+        for e in candidates:
+            if e['name'] == ptr:
+                return e
+    return sorted(candidates, key=lambda e: (len(e['name']), e['name']))[0]
 
 
 def main():
@@ -124,18 +126,19 @@ def main():
                 continue
 
         ptr = (look.get('scan') or {}).get('hostname', '')
-        primary = choose_primary(info['names'], ptr)
-        aliases = [n for n in info['names'] if n != primary]
+        primary = choose_primary(info['entries'], ptr)
+        # Ordered name list, canonical first — position 0 drives PTR on push.
+        ordered = [primary] + [e for e in info['entries'] if e is not primary]
+        aliases = len(ordered) - 1
         existing = look.get('record')
 
         body = {
             'address': addr,
             'status': 'active',
-            'dns_name': primary,
+            'dns_name': primary['name'] if primary['enabled'] else '',
             'description': 'DNS record from DNSMAQ-MGR',
             'source': 'dnsmasq-mgr',
-            'ext_id': info['ids'][info['names'].index(primary)],
-            'meta': {'aliases': aliases} if aliases else {},
+            'ext_id': primary['id'],
         }
         # Never clobber an assignment or MAC someone recorded by hand.
         if existing:
@@ -143,20 +146,36 @@ def main():
                 if existing.get(keep):
                     body[keep] = existing[keep]
 
-        label = '%-16s %-32s' % (addr, primary + (' (+%d)' % len(aliases) if aliases else ''))
+        label = '%-16s %-32s' % (addr, primary['name']
+                                 + (' (+%d)' % aliases if aliases else ''))
         if args.dry_run:
             print('  %s %s%s' % ('~' if existing else '+', label,
                                  '' if in_network else '  [outside every network]'))
             continue
 
         if existing:
-            _, st = request('%s/api/addresses/%s' % (args.ipam.rstrip('/'), existing['id']),
-                            args.ipam_token, 'POST', body)
+            resp, st = request('%s/api/addresses/%s' % (args.ipam.rstrip('/'), existing['id']),
+                               args.ipam_token, 'POST', body)
             ok, updated = st == 200, updated + (1 if st == 200 else 0)
+            rid = existing['id']
         else:
-            _, st = request('%s/api/addresses' % args.ipam.rstrip('/'),
-                            args.ipam_token, 'POST', body)
+            resp, st = request('%s/api/addresses' % args.ipam.rstrip('/'),
+                               args.ipam_token, 'POST', body)
             ok, created = st == 200, created + (1 if st == 200 else 0)
+            rid = resp.get('id')
+        # The full ordered name list, lossless: every name with its own
+        # comment, enabled flag and the DNSMAQ record id (ext_id) — what makes
+        # the push round-trip reproduce the zone identically.
+        if ok and rid:
+            _, nst = request('%s/api/addresses/%s/names' % (args.ipam.rstrip('/'), rid),
+                             args.ipam_token, 'POST',
+                             {'names': [{'name': e['name'], 'rtype': 'a',
+                                         'comment': e['comment'],
+                                         'enabled': e['enabled'],
+                                         'ext_id': e['id']} for e in ordered]})
+            if nst != 200:
+                ok = False
+                print('  ! %-16s names write failed (HTTP %s)' % (addr, nst))
         print('  %s %s%s' % ('~' if existing else '+' if ok else '!', label,
                              '' if in_network else '  [outside every network]'))
 
