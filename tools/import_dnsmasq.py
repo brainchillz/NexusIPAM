@@ -74,16 +74,11 @@ def group_by_address(hosts):
     return out
 
 
-def choose_primary(entries, ptr):
-    """PTR match wins; otherwise the shortest enabled name (then alphabetical,
-    so the result is stable across runs rather than dependent on dict order)."""
-    candidates = [e for e in entries if e['enabled']] or entries
-    if ptr:
-        ptr = ptr.rstrip('.')
-        for e in candidates:
-            if e['name'] == ptr:
-                return e
-    return sorted(candidates, key=lambda e: (len(e['name']), e['name']))[0]
+# NOTE: no canonical-choosing heuristic. The node's record order IS the
+# canonical order — the first hosts entry for an address is what answers PTR
+# there today, so a lossless import preserves that order verbatim (position 0
+# = the node's first record). Reordering is an operator decision made in IPAM
+# afterwards, not something an importer should invent.
 
 
 def main():
@@ -125,10 +120,8 @@ def main():
                 skipped += 1
                 continue
 
-        ptr = (look.get('scan') or {}).get('hostname', '')
-        primary = choose_primary(info['entries'], ptr)
-        # Ordered name list, canonical first — position 0 drives PTR on push.
-        ordered = [primary] + [e for e in info['entries'] if e is not primary]
+        ordered = info['entries']            # node order, preserved verbatim
+        primary = next((e for e in ordered if e['enabled']), ordered[0])
         aliases = len(ordered) - 1
         existing = look.get('record')
 
