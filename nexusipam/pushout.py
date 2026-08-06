@@ -215,16 +215,16 @@ def push_target_delete(name):
     return jsonify({'success': True})
 
 
-@bp.route('/api/push/run', methods=['POST'])
-def push_run():
-    """Push the hosts section to every enabled target (or ?target=<name>).
-    One serial per run: every node that acks it holds the same zone."""
-    only = (request.args.get('target') or '').strip()
+def run_push(only=''):
+    """Push the hosts section to every enabled target (or one, by name).
+    One serial per run: every node that acks it holds the same zone.
+    Returns a result dict, or (None, error) when no target matches — shared
+    by the route below and the provision workflow."""
     targets = _targets()
     picked = [t for t in targets
               if (t['name'] == only if only else t.get('enabled', True))]
     if not picked:
-        return err('No matching push target — configure one first')
+        return None, 'No matching push target — configure one first'
     records = build_hosts()
     with db.WRITE_LOCK:
         serial = int(db.get_setting(SERIAL_KEY, '0') or 0) + 1
@@ -242,6 +242,14 @@ def push_run():
                  'serial %d, %d record(s) → %s' % (serial, len(records),
                  ', '.join('%s:%s' % (r['name'], 'ok' if r['ok'] else 'FAIL')
                            for r in results)))
-    return jsonify({'success': all(r['ok'] for r in results),
-                    'serial': serial, 'records': len(records),
-                    'results': results})
+    return {'success': all(r['ok'] for r in results),
+            'serial': serial, 'records': len(records),
+            'results': results}, None
+
+
+@bp.route('/api/push/run', methods=['POST'])
+def push_run():
+    out, e = run_push((request.args.get('target') or '').strip())
+    if e:
+        return err(e)
+    return jsonify(out)

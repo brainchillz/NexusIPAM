@@ -1262,3 +1262,56 @@ def test_push_failure_recorded(client, monkeypatch):
     t = st['targets'][0]
     assert t['last']['ok'] is False and 'token' in t['last']['detail']
     assert t['serial'] == 0                          # never acked anything
+
+
+# ─── Provision / deprovision (phase 3) ────────────────────────────────
+
+def test_provision_full_cycle(client, monkeypatch):
+    from nexusipam import pushout
+    pushes = []
+    monkeypatch.setattr(pushout, 'run_push',
+                        lambda only='': (pushes.append(only),
+                                         ({'success': True, 'serial': 9,
+                                           'records': 1, 'results': []}, None))[1])
+    mknet(client, '10.40.0.0/24')
+    r = client.post('/api/provision', json={'name': 'web01.example.net',
+                                            'network': '10.40.0.0/24',
+                                            'aliases': ['www.example.net'],
+                                            'mac': 'aa:bb:cc:00:11:22'})
+    assert r.status_code == 200, r.json
+    out = r.json
+    assert out['address'].startswith('10.40.0.')
+    assert [n['name'] for n in out['names']] == ['web01.example.net', 'www.example.net']
+    assert out['push']['success'] and len(pushes) == 1
+    assert out['gateway'] is not None or 'gateway' in out    # deploy payload rode along
+
+    # same name again → refused, not round-robin by accident
+    r2 = client.post('/api/provision', json={'name': 'web01.example.net',
+                                             'network': '10.40.0.0/24'})
+    assert r2.status_code == 409 and out['address'] in r2.json['error']
+
+    # deprovision by name reverses everything and pushes again
+    r3 = client.post('/api/deprovision', json={'name': 'web01.example.net'})
+    assert r3.json['success'] and r3.json['action'] == 'released'
+    assert len(pushes) == 2
+    look = client.get('/api/addresses/lookup?address=%s' % out['address']).json
+    assert look['record'] is None
+
+
+def test_provision_bad_alias_rolls_back_allocation(client, monkeypatch):
+    from nexusipam import pushout
+    monkeypatch.setattr(pushout, 'run_push', lambda only='': (None, 'no targets'))
+    mknet(client, '10.41.0.0/29')
+    r = client.post('/api/provision', json={'name': 'ok.example.net',
+                                            'network': '10.41.0.0/29',
+                                            'aliases': ['not a name']})
+    assert r.status_code == 400
+    # the allocated address was rolled back, not leaked
+    free_before = client.get('/api/networks').json
+    r2 = client.post('/api/provision', json={'name': 'ok.example.net',
+                                             'network': '10.41.0.0/29'})
+    assert r2.status_code == 200
+    r3 = client.post('/api/deprovision', json={'name': 'ok.example.net', 'keep': True})
+    assert r3.json['action'] == 'deprecated'
+    look = client.get('/api/addresses/lookup?address=%s' % r2.json['address']).json
+    assert look['record']['status'] == 'deprecated' and look['record']['dns_name'] == ''
