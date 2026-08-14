@@ -226,5 +226,63 @@ async function page_dns() {
       ${domains.map(z => `<a class="btn btn-sm btn-outline" href="/api/export/zone?domain=${encodeURIComponent(z)}" target="_blank">zone: ${escapeHtml(z)}</a>`).join('')}
     </div>
     <p class="help">The JSON export matches the body DNSMAQ-MGR's <code>/api/dns/hosts</code> endpoint accepts,
-      so a sync script can fetch here and POST there without translating anything.</p>`;
+      so a sync script can fetch here and POST there without translating anything.</p>
+
+    <h3 style="margin-top:24px">DHCP-side names</h3>
+    <p class="help">Names the DHCP server resolves that this plan does not publish — a reservation's
+      Local DNS Record, its UniFi label, or the hostname the device itself claimed. Adopting takes
+      the name into the plan (canonical if the address has none, an alias otherwise); publishing it
+      is then an ordinary push. <strong>Adopting a Local DNS Record is a handover</strong>: the next
+      push unticks the client's own record and Static DNS takes over. Lease-derived names are
+      listed but never adopted — a dynamic name in authoritative DNS goes stale on its own.</p>
+    <div class="toolbar"><button class="btn btn-sm" onclick="loadNameCandidates(this)">Scan for candidates</button></div>
+    <div id="name-candidates"></div>`;
+}
+
+// Reads every gateway target live, so it runs on demand rather than on page load.
+async function loadNameCandidates(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  let r;
+  try { r = await API.get('/api/names/candidates'); }
+  catch (e) {
+    $('name-candidates').innerHTML = `<div class="alert alert-danger">${escapeHtml(e.message)}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = 'Scan for candidates'; }
+    return;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Rescan'; }
+  const conf = {high: 'green', medium: 'yellow', low: 'gray'};
+  const flags = c => [
+    c.dynamic ? '<span class="status-badge gray" title="From a lease, not a reservation — never adopted">dynamic</span>' : '',
+    !c.valid ? '<span class="status-badge red" title="Not a valid DNS name — would be dropped, never mangled">invalid</span>' : '',
+    c.conflict ? `<span class="status-badge red" title="Already points at ${escapeHtml(c.conflict)}">conflict</span>` : '',
+    c.handover ? '<span class="status-badge yellow" title="Adopting unticks the client record on the next push">handover</span>' : '',
+    !c.recorded ? '<span class="status-badge gray" title="Address has no plan record — pull the gateway first">unrecorded</span>' : '',
+  ].filter(Boolean).join(' ');
+  $('name-candidates').innerHTML = `
+    ${(r.errors || []).map(e => `<div class="alert alert-warning">${escapeHtml(e)}</div>`).join('')}
+    ${dataTable([
+      {label: 'Address', sortKey: 'address', get: c => `<a class="cidr" onclick="addressPeek('${jsArg(c.address)}')">${escapeHtml(c.address)}</a>`},
+      {label: 'DHCP-side name', get: c => escapeHtml(c.name)},
+      {label: 'Would publish', get: c => `<code>${escapeHtml(c.fqdn)}</code>`},
+      {label: 'Source', get: c => `${typeBadge(c.source)} <span class="status-badge ${conf[c.confidence] || 'gray'}">${escapeHtml(c.confidence)}</span>`},
+      {label: '', get: flags},
+      {label: '', cls: 'row-actions', get: c =>
+        canWrite() && !c.dynamic && c.valid && !c.conflict && c.recorded
+          ? `<button class="btn btn-sm" onclick="adoptCandidate('${jsArg(c.address)}')">Adopt</button>` : ''},
+    ], r.candidates, 'Nothing — every DHCP-side name is already in the plan', {key: 'namecands'})}`;
+}
+
+async function adoptCandidate(address) {
+  try {
+    const r = await API.post('/api/names/adopt', {addresses: [address]});
+    if (r.adopted.length) {
+      const a = r.adopted[0];
+      alert(`${a.fqdn} adopted as ${a.as} for ${a.address}.` +
+            (a.handover ? '\n\nThe next push takes this name over from the client record.' : '') +
+            '\n\nPublish with Push now (Settings → Push targets).');
+    } else if (r.refused.length) {
+      alert(r.refused[0].reason);
+    }
+  } catch (e) { alert(e.message); }
+  loadNameCandidates();
 }

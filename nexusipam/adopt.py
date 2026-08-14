@@ -166,6 +166,195 @@ def adopt_snapshot(state, source='unifi'):
     return out
 
 
+# ─── DHCP-derived DNS names ───────────────────────────────────────────
+# When a host gets a DHCP reservation, the gateway resolves a name for it
+# that this plan knows nothing about — so it resolves there and nowhere
+# else. Three per-client sources, three trust levels, and the trust order
+# drives everything below:
+#
+#   local_dns       a Local DNS Record: an FQDN someone chose, already
+#                   served. Adopting one is a HANDOVER — the next push
+#                   unticks the client record and Static DNS takes over.
+#   label           the UniFi client name ("Cindys Phone") — human label,
+#                   usually not DNS-safe. Proposed, never mangled into shape.
+#   opt12_hostname  DHCP option 12 — client-supplied and unvalidated; a
+#                   device can claim to be `ns1`. Lowest trust.
+#
+# Lease-derived names rank below all three and are NEVER adopted: publishing
+# a dynamic name into authoritative DNS goes stale with nobody touching it —
+# the exact failure the lease overlay exists to avoid. They still appear as
+# candidates (flagged `dynamic`) so the operator can see them and, if one
+# matters, give the machine a reservation first.
+
+NAME_SOURCES = (('local_dns', 'high'), ('label', 'medium'),
+                ('opt12_hostname', 'low'))
+
+
+def _qualify(name, domain):
+    """Bare name -> FQDN using the network domain. Push deliberately does not
+    qualify, so anything stored must already be fully qualified."""
+    name = str(name or '').strip().rstrip('.')
+    if name and domain and '.' not in name:
+        return '%s.%s' % (name, domain)
+    return name
+
+
+def name_candidates():
+    """Every DHCP-side name this plan does not publish, best source first.
+    Reads each enabled gateway target live plus the lease overlay; a target
+    that cannot be read is reported, not fatal."""
+    from . import unifi
+    from .pushout import _targets
+    from .core.validators import valid_fqdn
+    from .networks import network_for
+
+    raw_entries, errors = [], []
+    for target in _targets():
+        if (target.get('kind') or 'dnsmaq') != 'unifi' or not target.get('enabled', True):
+            continue
+        peer = dict(target)
+        peer['verify'] = target.get('verify') or 'insecure'
+        try:
+            state = unifi.read_state(peer)
+        except Exception as e:
+            errors.append('%s: %s' % (target['name'], e))
+            continue
+        for res in state.get('reservations') or []:
+            for source, confidence in NAME_SOURCES:
+                text = (res.get('names') or {}).get(source) or ''
+                if text:
+                    raw_entries.append({'ip': res['ip'], 'mac': res['mac'],
+                                        'target': target['name'], 'source': source,
+                                        'confidence': confidence, 'raw': text,
+                                        'dynamic': False})
+    # Lease hostnames come from the overlay already on hand — reading them
+    # does not need another gateway round trip.
+    for l in db.query("SELECT address, mac, hostname, source FROM dhcp_leases "
+                      "WHERE hostname <> ''"):
+        raw_entries.append({'ip': l['address'], 'mac': l['mac'],
+                            'target': l['source'], 'source': 'lease',
+                            'confidence': 'low', 'raw': l['hostname'],
+                            'dynamic': True})
+
+    out, seen = [], set()
+    for e in raw_entries:
+        ip = netutil.parse_ip(e['ip'])
+        if ip is None:
+            continue
+        rec = db.query_one('SELECT id FROM ip_addresses WHERE address=?', (str(ip),))
+        net = network_for(netutil.hexify(int(ip)), ip.version)
+        fqdn = _qualify(e['raw'], (net or {}).get('domain') or '')
+        key = (str(ip), fqdn.lower())
+        if key in seen:            # trust order: the first source for a name wins
+            continue
+        seen.add(key)
+        published = {n['name'].lower() for n in db.query(
+            'SELECT ip_names.name FROM ip_names JOIN ip_addresses '
+            'ON ip_addresses.id = ip_names.address_id '
+            'WHERE ip_addresses.address=? AND ip_names.enabled=1', (str(ip),))}
+        if fqdn.lower() in published:
+            continue               # already ours — not a candidate
+        clash = db.query_one(
+            'SELECT a.address FROM ip_names n JOIN ip_addresses a ON a.id=n.address_id '
+            'WHERE n.name=? COLLATE NOCASE AND n.enabled=1 AND a.address<>?',
+            (fqdn, str(ip)))
+        out.append({'address': str(ip), 'mac': e['mac'], 'target': e['target'],
+                    'source': e['source'], 'confidence': e['confidence'],
+                    'dynamic': e['dynamic'], 'name': e['raw'], 'fqdn': fqdn,
+                    'valid': valid_fqdn(fqdn),
+                    'conflict': clash['address'] if clash else '',
+                    'recorded': bool(rec),
+                    'handover': e['source'] == 'local_dns'})
+    # Stable sort: address order for the list, insertion (= trust) order kept
+    # within one address.
+    out.sort(key=lambda c: netutil.hexify(int(netutil.parse_ip(c['address']))))
+    return out, errors
+
+
+@bp.route('/api/names/candidates')
+def names_candidates():
+    cands, errors = name_candidates()
+    return jsonify({'candidates': cands, 'count': len(cands), 'errors': errors})
+
+
+@bp.route('/api/names/adopt', methods=['POST'])
+def names_adopt():
+    """Adopt the best candidate name for each listed address — explicitly, one
+    operator decision per address, mirroring scan_adopt. Rules, in order:
+    lease-derived names are refused; a name that fails valid_fqdn is dropped
+    rather than mangled; a name already resolving elsewhere is refused (as
+    /api/provision does); the name lands as canonical only when the address
+    has none, else as an alias — position 0 and the PTR never move silently.
+    Publishing stays a separate, ordinary push."""
+    from .addresses import get_names, set_names
+
+    data = request.get_json(silent=True) or {}
+    wanted = data.get('addresses')
+    if not isinstance(wanted, list) or not wanted:
+        return err('Expected {"addresses": [ ... ]}')
+    wanted = {str(netutil.parse_ip(a)) for a in wanted if netutil.parse_ip(a)}
+
+    cands, errors = name_candidates()
+    by_addr = {}
+    for c in cands:
+        by_addr.setdefault(c['address'], []).append(c)
+
+    adopted, refused = [], []
+    with db.WRITE_LOCK:
+        for address in sorted(wanted):
+            options = by_addr.get(address) or []
+            best = next((c for c in options if not c['dynamic']), None)
+            if best is None:
+                refused.append({'address': address,
+                                'reason': ('only a lease-derived name — give the '
+                                           'machine a reservation first; a dynamic '
+                                           'name in authoritative DNS goes stale on '
+                                           'its own') if options else 'no candidate name'})
+                continue
+            if not best['valid']:
+                refused.append({'address': address,
+                                'reason': '%r is not a valid DNS name — dropped '
+                                          'rather than mangled' % best['name']})
+                continue
+            if best['conflict']:
+                refused.append({'address': address,
+                                'reason': '%s already points at %s — deprovision it '
+                                          'first, or alias it there'
+                                          % (best['fqdn'], best['conflict'])})
+                continue
+            rec = db.query_one('SELECT id FROM ip_addresses WHERE address=?', (address,))
+            if not rec:
+                refused.append({'address': address,
+                                'reason': 'address is not recorded — adopt the '
+                                          'gateway (pull) first'})
+                continue
+            current = get_names(rec['id'])
+            if any(n['name'].lower() == best['fqdn'].lower() for n in current):
+                # Present but disabled: someone chose not to publish it, and
+                # adoption must not silently overrule that choice.
+                refused.append({'address': address,
+                                'reason': '%s exists on the record but is disabled '
+                                          '— enable it there if wanted' % best['fqdn']})
+                continue
+            items = list(current) + [{'name': best['fqdn'],
+                                      'comment': 'adopted from %s (%s)'
+                                                 % (best['target'], best['source'])}]
+            _, e = set_names(rec['id'], items)
+            if e:
+                refused.append({'address': address, 'reason': e})
+                continue
+            adopted.append({'address': address, 'fqdn': best['fqdn'],
+                            'source': best['source'],
+                            'as': 'alias' if current else 'canonical',
+                            'handover': best['handover']})
+        if adopted:
+            db.audit(actor(), 'adopt-names', 'ip_addresses', None,
+                     db.audit_list(['%s=%s' % (a['fqdn'], a['address'])
+                                    for a in adopted]))
+    return jsonify({'success': not refused, 'adopted': adopted,
+                    'refused': refused, 'errors': errors})
+
+
 @bp.route('/api/push/targets/<name>/pull', methods=['POST'])
 def target_pull(name):
     """Adopt what a target already holds. `?dry_run=1` reads and reports

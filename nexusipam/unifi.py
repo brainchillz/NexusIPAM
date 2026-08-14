@@ -851,9 +851,23 @@ def read_state(peer, client=None):
                                 'enabled': bool(n.get('dhcpd_enabled'))}
             out['networks'].append(rec)
         for mac, f in sorted(fixed.items()):
-            out['reservations'].append({'mac': mac, 'ip': f['ip'],
-                                        'hostname': f.get('name') or '',
-                                        'ext_id': f.get('id') or ''})
+            raw = f.get('raw') or {}
+            out['reservations'].append({
+                'mac': mac, 'ip': f['ip'],
+                'hostname': f.get('name') or '',
+                'ext_id': f.get('id') or '',
+                # The three DNS-name sources a client object carries, kept
+                # apart because they carry three different levels of trust:
+                # local_dns is an FQDN someone chose and the gateway already
+                # serves; label is a human name ("Cindys Phone") that is not
+                # DNS-safe; opt12_hostname is client-supplied and unvalidated
+                # (a device can claim to be `ns1`).
+                'names': {
+                    'local_dns': (raw.get('local_dns_record') or '').rstrip('.')
+                                 if raw.get('local_dns_record_enabled', True) else '',
+                    'label': raw.get('name') or '',
+                    'opt12_hostname': raw.get('hostname') or '',
+                }})
         return out
     finally:
         if own:
