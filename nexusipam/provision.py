@@ -28,8 +28,8 @@ bp = Blueprint('provision', __name__)
 @bp.route('/api/provision', methods=['POST'])
 def api_provision():
     """Body: name (fqdn, required) · network_id|network|cidr (required) ·
-    aliases[] · mac · assigned_kind/assigned_id · description ·
-    push (default true) · verify (ping-check candidate first).
+    aliases[] · mac · is_reservation (needs mac) · assigned_kind/assigned_id ·
+    description · push (default true) · verify (ping-check candidate first).
     """
     from .allocate import _resolve_network, free_addresses
     from .addresses import set_names, validate_assignment
@@ -48,6 +48,11 @@ def api_provision():
     mac = norm_mac(data.get('mac'))
     if mac is None:
         return err('Invalid MAC address')
+    is_reservation = bool(data.get('is_reservation'))
+    if is_reservation and not mac:
+        # A reservation is a MAC->IP binding; without the MAC there is nothing
+        # to publish and the flag would sit there looking satisfied.
+        return err('A DHCP reservation needs a MAC address')
     desc, e = clean_text(data.get('description'), 'Description')
     if e:
         return err(e)
@@ -82,7 +87,8 @@ def api_provision():
             'addr_hex': addr_hex,
             'network_id': owner['id'] if owner else net_row['id'],
             'status': 'active', 'assigned_kind': kind, 'assigned_id': assigned_id,
-            'mac': mac, 'dns_name': name, 'description': desc,
+            'mac': mac, 'is_reservation': 1 if is_reservation else 0,
+            'dns_name': name, 'description': desc,
             'source': str(data.get('source') or 'manual').strip() or 'manual',
             'ext_id': str(data.get('ext_id') or '')[:128]})
         names, e = set_names(rid, [name] + aliases)
@@ -127,10 +133,12 @@ def api_deprovision():
     with db.WRITE_LOCK:
         if data.get('keep'):
             # Out of rotation but remembered: drop the names (CASCADE), keep
-            # the row so the address is not re-allocated for a while.
+            # the row so the address is not re-allocated for a while. The
+            # reservation flag is cleared too — a parked address must not keep
+            # its MAC binding published to the DHCP server.
             db.execute('DELETE FROM ip_names WHERE address_id=?', (rec['id'],))
             db.update('ip_addresses', rec['id'],
-                      {'status': 'deprecated', 'dns_name': '',
+                      {'status': 'deprecated', 'dns_name': '', 'is_reservation': 0,
                        'assigned_kind': '', 'assigned_id': None})
             action = 'deprecated'
         else:

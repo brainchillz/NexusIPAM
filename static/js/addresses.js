@@ -192,8 +192,10 @@ async function provisionModal() {
       <select id="pv-net" class="form-control">
         ${nets.map(n => `<option value="${n.id}">${escapeHtml(n.cidr + (n.name ? ' — ' + n.name : ''))}</option>`).join('')}
       </select></div>
-    <div class="form-group"><label>MAC (optional — recorded for the future DHCP reservation)</label>
+    <div class="form-group"><label>MAC (optional)</label>
       <input id="pv-mac" class="form-control" placeholder="aa:bb:cc:dd:ee:ff" spellcheck="false"></div>
+    <label class="checkitem" style="padding-left:0"><input id="pv-resv" type="checkbox">
+      DHCP reservation — publish this MAC→address binding in the dhcp section</label>
     <button class="btn" onclick="provisionGo(this)">Provision</button>
     <div id="pv-result"></div>`);
 }
@@ -205,6 +207,7 @@ async function provisionGo(btn) {
       name: $('pv-name').value.trim(),
       network_id: Number($('pv-net').value),
       mac: $('pv-mac').value.trim(),
+      is_reservation: $('pv-resv').checked,
     });
     const push = r.push ? r.push.results.map(x => `${x.name} ${x.ok ? 'ok' : 'FAILED'}`).join(', ') : 'no push targets';
     $('pv-result').innerHTML = `<div class="health-ok">✓ ${escapeHtml(r.names[0].name)} = ${escapeHtml(r.address)}

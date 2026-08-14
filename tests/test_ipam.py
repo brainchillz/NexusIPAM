@@ -1920,6 +1920,118 @@ def test_unifi_read_leases_skips_fixed_ip_clients():
                     'hostname': 'dyn', 'expires': 0}]
 
 
+def test_lease_refresh_all_reads_every_gateway_and_survives_one_failing(client, monkeypatch):
+    """The scheduled refresher polls each enabled unifi target; a dnsmaq node
+    has no leases to offer and one unreachable gateway must not stop the
+    others being read."""
+    from nexusipam import leases, unifi
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    for name in ('gw-ok', 'gw-down'):
+        client.post('/api/push/targets',
+                    json={'name': name, 'kind': 'unifi', 'url': 'https://gw',
+                          'unifi_username': 'admin', 'unifi_password': 'pw'})
+
+    def fake_read(peer, client=None):
+        if peer['name'] == 'gw-down':
+            raise unifi.UniFiError('login rejected')
+        return [{'ip': '10.90.0.7', 'mac': 'aa:bb:cc:00:90:01', 'hostname': 'dyn'}]
+
+    monkeypatch.setattr(unifi, 'read_leases', fake_read)
+    report = leases.refresh_all()
+    assert {r['target']: r['ok'] for r in report} == {'gw-ok': True, 'gw-down': False}
+    rows = client.get('/api/leases').get_json()['leases']
+    assert [(l['address'], l['source']) for l in rows] == [('10.90.0.7', 'gw-ok')]
+
+
+# ─── DHCP-derived DNS names ───────────────────────────────────────────
+
+def _fake_gateway_names(client, monkeypatch, reservations):
+    """A unifi target whose read_state returns the given reservations."""
+    from nexusipam import unifi
+    client.post('/api/push/targets',
+                json={'name': 'gw', 'kind': 'unifi', 'url': 'https://gw',
+                      'unifi_username': 'admin', 'unifi_password': 'pw'})
+    monkeypatch.setattr(unifi, 'read_state',
+                        lambda peer, client=None: {'networks': [],
+                                                   'reservations': reservations})
+
+
+def test_name_candidates_carry_source_and_trust(client, monkeypatch):
+    """Three name sources per reservation, three trust levels; names the plan
+    already publishes are not candidates; lease hostnames appear flagged
+    dynamic. Bare names are qualified with the network domain — push does not
+    qualify, so the stored form must be the FQDN."""
+    from nexusipam import leases
+    mknet(client, '10.70.0.0/24', domain='example.net')
+    _mk_addr(client, '10.70.0.8', dns_name='printer.example.net')
+    _mk_addr(client, '10.70.0.9')
+    _fake_gateway_names(client, monkeypatch, [
+        # local_dns matches what is already published -> only the label is new
+        {'ip': '10.70.0.8', 'mac': 'aa:bb:cc:00:70:01', 'hostname': 'Printer',
+         'names': {'local_dns': 'printer.example.net', 'label': 'Office Printer',
+                   'opt12_hostname': ''}},
+        # bare hostname -> qualified with the network domain
+        {'ip': '10.70.0.9', 'mac': 'aa:bb:cc:00:70:02', 'hostname': 'nas',
+         'names': {'local_dns': '', 'label': '', 'opt12_hostname': 'nas'}},
+    ])
+    leases.record_leases('gw', [{'ip': '10.70.0.50', 'mac': 'aa:bb:cc:00:70:03',
+                                 'hostname': 'laptop'}])
+
+    r = client.get('/api/names/candidates').get_json()
+    by_fqdn = {c['fqdn']: c for c in r['candidates']}
+    assert 'printer.example.net' not in by_fqdn          # already published
+    label = by_fqdn['Office Printer.example.net']
+    assert label['source'] == 'label' and label['confidence'] == 'medium'
+    assert label['valid'] is False                        # propose, never mangle
+    nas = by_fqdn['nas.example.net']
+    assert (nas['source'], nas['confidence'], nas['valid']) == \
+        ('opt12_hostname', 'low', True)
+    dyn = by_fqdn['laptop.example.net']
+    assert dyn['dynamic'] is True and dyn['source'] == 'lease'
+
+
+def test_name_adopt_rules(client, monkeypatch):
+    """Adopt is explicit and conservative: canonical only on a nameless
+    address, alias otherwise; collisions refused; invalid names dropped;
+    lease-derived names refused outright."""
+    from nexusipam import leases, pushout
+    mknet(client, '10.71.0.0/24', domain='example.net')
+    _mk_addr(client, '10.71.0.5')                                  # nameless
+    _mk_addr(client, '10.71.0.6', dns_name='web.example.net')      # has a name
+    _mk_addr(client, '10.71.0.7')                                  # collision case
+    _mk_addr(client, '10.71.0.9')                                  # lease-only
+    _fake_gateway_names(client, monkeypatch, [
+        {'ip': '10.71.0.5', 'mac': 'aa:bb:cc:00:71:01', 'hostname': '',
+         'names': {'local_dns': 'nas.example.net', 'label': 'NAS',
+                   'opt12_hostname': 'nas'}},
+        {'ip': '10.71.0.6', 'mac': 'aa:bb:cc:00:71:02', 'hostname': '',
+         'names': {'local_dns': '', 'label': '', 'opt12_hostname': 'media'}},
+        {'ip': '10.71.0.7', 'mac': 'aa:bb:cc:00:71:03', 'hostname': '',
+         'names': {'local_dns': 'web.example.net', 'label': '',
+                   'opt12_hostname': ''}},
+    ])
+    leases.record_leases('gw', [{'ip': '10.71.0.9', 'mac': 'aa:bb:cc:00:71:09',
+                                 'hostname': 'roamer'}])
+
+    r = client.post('/api/names/adopt',
+                    json={'addresses': ['10.71.0.5', '10.71.0.6', '10.71.0.7',
+                                        '10.71.0.9']}).get_json()
+    adopted = {a['address']: a for a in r['adopted']}
+    # Highest-trust source wins and lands canonical on the nameless address.
+    assert adopted['10.71.0.5']['fqdn'] == 'nas.example.net'
+    assert adopted['10.71.0.5']['as'] == 'canonical'
+    assert adopted['10.71.0.5']['handover'] is True
+    # An address with names gains an alias; position 0 (the PTR) never moves.
+    assert adopted['10.71.0.6']['as'] == 'alias'
+    refused = {x['address']: x['reason'] for x in r['refused']}
+    assert 'web.example.net' in refused['10.71.0.7']      # resolves elsewhere
+    assert 'reservation' in refused['10.71.0.9']          # lease-derived
+    # The adopted names are exactly what the hosts payload now renders.
+    rendered = {h['name'] for h in pushout.build_hosts()}
+    assert {'nas.example.net', 'web.example.net', 'media.example.net'} <= rendered
+
+
 def test_leases_are_not_in_the_backup_set():
     """Observed state is re-observed, not restored — and a stale lease table
     restored into a live instance would describe a network that has moved on."""
@@ -2015,6 +2127,78 @@ def test_serials_carry_forward_from_the_pre_section_counter(client, monkeypatch)
                         lambda t, data, serials: (seen.append(serials), (True, 'ok'))[1])
     client.post('/api/push/run')
     assert seen[-1] == {'hosts': 15}
+
+
+def test_drift_reads_the_gateway_back_and_diffs(client, monkeypatch):
+    """Serials say a target ACKED the content; drift says whether it still
+    HOLDS it. Same pure planners as the push, executed on nothing."""
+    from nexusipam import pushout
+    mknet(client, '10.72.0.0/24', domain='example.net')
+    _mk_addr(client, '10.72.0.5', dns_name='drifty.example.net')
+    target = {'name': 'gw', 'kind': 'unifi', 'url': 'https://gw',
+              'unifi_username': 'a', 'unifi_password': 'b',
+              'sections': ['hosts', 'dhcp'], 'enabled': True}
+
+    class FakeClient:
+        def __init__(self, static):
+            self._static = static
+
+        def list_static(self):
+            return self._static
+
+        def list_client_dns(self):
+            return {}
+
+        def list_networks(self):
+            return {}
+
+        def list_fixed(self):
+            return {}
+
+    in_sync = FakeClient({('drifty.example.net', 'A'):
+                          {'id': 'x', 'value': '10.72.0.5', 'raw': {}}})
+    r = pushout.run_drift(target, client=in_sync)
+    assert r['ok'] and not r['sections']['hosts']['drifted']
+    assert not r['sections']['dhcp']['drifted']
+    assert r['sections']['hosts']['in_step'] == 1
+
+    gone = FakeClient({})
+    r = pushout.run_drift(target, client=gone)
+    h = r['sections']['hosts']
+    assert h['drifted'] and h['counts']['missing'] == 1
+    assert 'missing drifty.example.net' in h['examples']
+
+
+def test_drift_route_stores_the_verdict_and_refuses_dnsmaq(client, monkeypatch):
+    from nexusipam import pushout
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    r = client.post('/api/push/targets/ns1/drift')
+    assert r.status_code == 400 and 'locks' in r.json['error']
+
+    client.post('/api/push/targets',
+                json={'name': 'gw', 'kind': 'unifi', 'url': 'https://gw',
+                      'unifi_username': 'a', 'unifi_password': 'b'})
+    monkeypatch.setattr(pushout, 'run_drift',
+                        lambda t: {'ts': 1, 'ok': True, 'sections': {
+                            'hosts': {'drifted': True, 'in_step': 3,
+                                      'counts': {'extra': 2},
+                                      'examples': ['extra x']}}})
+    r = client.post('/api/push/targets/gw/drift')
+    assert r.status_code == 200 and r.json['drift']['sections']['hosts']['drifted']
+    gw = next(t for t in client.get('/api/push').json['targets']
+              if t['name'] == 'gw')
+    assert gw['drift']['sections']['hosts']['counts'] == {'extra': 2}
+
+    # An unreachable gateway is recorded too — a failed check must not be
+    # indistinguishable from an unchecked target.
+    def boom(t):
+        raise OSError('no route to gateway')
+    monkeypatch.setattr(pushout, 'run_drift', boom)
+    assert client.post('/api/push/targets/gw/drift').status_code == 502
+    gw = next(t for t in client.get('/api/push').json['targets']
+              if t['name'] == 'gw')
+    assert gw['drift']['ok'] is False and 'no route' in gw['drift']['error']
 
 
 def test_unsubscribed_target_is_skipped_not_failed(client, monkeypatch):
@@ -2234,6 +2418,35 @@ def test_provision_full_cycle(client, monkeypatch):
     assert len(pushes) == 2
     look = client.get('/api/addresses/lookup?address=%s' % out['address']).json
     assert look['record'] is None
+
+
+def test_provision_carries_the_reservation_flag(client, monkeypatch):
+    """Provisioning with a MAC can publish the DHCP reservation in the same
+    action, and deprovision (keep) withdraws it — a parked address must not
+    keep its MAC binding published."""
+    from nexusipam import pushout
+    monkeypatch.setattr(pushout, 'run_push', lambda only='': (None, 'no targets'))
+    mknet(client, '10.42.0.0/29')
+
+    # The flag without a MAC is unpublishable — refused, not stored inert.
+    r = client.post('/api/provision', json={'name': 'resv.example.net',
+                                            'network': '10.42.0.0/29',
+                                            'is_reservation': True})
+    assert r.status_code == 400 and 'MAC' in r.json['error']
+
+    r = client.post('/api/provision', json={'name': 'resv.example.net',
+                                            'network': '10.42.0.0/29',
+                                            'mac': 'aa:bb:cc:00:42:01',
+                                            'is_reservation': True})
+    assert r.status_code == 200
+    leases = pushout.build_dhcp()['static_leases']
+    assert [(l['mac'], l['ip']) for l in leases] == \
+        [('aa:bb:cc:00:42:01', r.json['address'])]
+
+    client.post('/api/deprovision', json={'name': 'resv.example.net', 'keep': True})
+    assert pushout.build_dhcp()['static_leases'] == []
+    look = client.get('/api/addresses/lookup?address=%s' % r.json['address']).json
+    assert look['record']['is_reservation'] == 0
 
 
 def test_provision_bad_alias_rolls_back_allocation(client, monkeypatch):
