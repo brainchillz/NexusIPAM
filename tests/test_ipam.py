@@ -1423,6 +1423,11 @@ def test_build_dhcp_carries_extra_options_and_reservations(client):
                                            'enabled': False})
     _mk_addr(client, '10.82.0.9', mac='aa:bb:cc:dd:ee:01', dns_name='pxe.lab.lan',
              status='reserved')
+    # A hypervisor import knows this VM's MAC, but the machine is statically
+    # configured and never asks for a lease — pushing it would fabricate a
+    # reservation on the DHCP server for an address nobody leases.
+    _mk_addr(client, '10.82.0.8', mac='aa:bb:cc:dd:ee:02', dns_name='vm.lab.lan',
+             status='active')
     out = pushout.build_dhcp()
     opts = {o['option']: o['value'] for o in out['options']}
     assert opts['option:ntp-server'] == '10.82.0.5' and opts['66'] == '10.82.0.236'
@@ -1492,8 +1497,10 @@ def _payload(**over):
 
 def test_unifi_dhcp_maps_dnsmasq_options_onto_gateway_fields():
     from nexusipam import unifi
+    # A router that is NOT the gateway's own interface, so the mapping is
+    # exercised rather than skipped as an implicit default.
     d = unifi.desired_dhcp(_payload(options=[
-        {'tag': 'lan', 'option': 'option:router', 'value': '192.168.9.1'},
+        {'tag': 'lan', 'option': 'option:router', 'value': '192.168.9.254'},
         {'tag': 'lan', 'option': '6', 'value': '192.168.9.53'},
         {'tag': 'lan', 'option': 'option:ntp-server', 'value': '192.168.9.5'},
         {'tag': 'lan', 'option': '66', 'value': '192.168.9.236'},
@@ -1502,12 +1509,37 @@ def test_unifi_dhcp_maps_dnsmasq_options_onto_gateway_fields():
     assert scope['lease'] == 43200                       # 12h -> seconds
     changes = unifi._scope_changes(scope, _UNIFI_NET['192.168.9.0/24'], False)
     assert changes['dhcpd_start'] == '192.168.9.50'
-    assert changes['dhcpd_gateway'] == '192.168.9.1' and changes['dhcpd_gateway_enabled']
+    assert changes['dhcpd_gateway'] == '192.168.9.254' and changes['dhcpd_gateway_enabled']
     assert changes['dhcpd_dns_1'] == '192.168.9.53' and changes['dhcpd_dns_2'] == ''
     assert changes['dhcpd_ntp_1'] == '192.168.9.5'
     assert changes['dhcpd_tftp_server'] == '192.168.9.236'
     assert changes['dhcpd_boot_filename'] == 'netboot.xyz.kpxe'
     assert changes['dhcpd_boot_server'] == '192.168.9.236'
+
+
+def test_unifi_dhcp_leaves_an_implicit_default_alone():
+    """UniFi says "hand out my own interface" by leaving the field off; the
+    plan says it by naming that address. Same effect, so writing the explicit
+    form is churn — and it costs the ability to prove a first push is a no-op."""
+    from nexusipam import unifi
+    raw = {'_id': 'n1', 'ip_subnet': '192.168.9.1/24',
+           'dhcpd_enabled': True, 'dhcpd_start': '192.168.9.50',
+           'dhcpd_stop': '192.168.9.99', 'dhcpd_leasetime': 43200,
+           'dhcpd_gateway_enabled': False, 'dhcpd_dns_enabled': False}
+    scope = unifi.desired_dhcp(_payload())['192.168.9.0/24']
+    scope['options'] = {'gateway': '192.168.9.1', 'dns': '192.168.9.1'}
+    assert unifi._scope_changes(scope, raw, False) == {}
+
+    # But a value that genuinely differs is still written.
+    scope['options'] = {'gateway': '192.168.9.254', 'dns': '192.168.9.1'}
+    changes = unifi._scope_changes(scope, raw, False)
+    assert changes == {'dhcpd_gateway_enabled': True,
+                       'dhcpd_gateway': '192.168.9.254'}
+
+    # And an explicit field already set is compared on its value, not skipped.
+    raw2 = dict(raw, dhcpd_dns_enabled=True, dhcpd_dns_1='9.9.9.9')
+    scope['options'] = {'dns': '192.168.9.1'}
+    assert unifi._scope_changes(scope, raw2, False)['dhcpd_dns_1'] == '192.168.9.1'
 
 
 def test_unifi_dhcp_never_touches_the_scope_switch_unless_asked():

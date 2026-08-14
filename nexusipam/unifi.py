@@ -588,15 +588,37 @@ def desired_dhcp(payload):
     return out
 
 
+def _own_ip(raw):
+    """The gateway's own address on this segment — what it hands out for
+    router and DNS when the explicit fields are switched off."""
+    try:
+        return str(ipaddress.ip_interface(raw.get('ip_subnet') or '').ip)
+    except ValueError:
+        return ''
+
+
 def _scope_changes(scope, raw, manage_state):
-    """The dhcpd_* fields that differ from what the gateway holds."""
+    """The dhcpd_* fields that differ from what the gateway holds.
+
+    "Differ" means differ in EFFECT, not in spelling. UniFi expresses "hand
+    out my own interface" by leaving the explicit field off, and the plan
+    expresses the same thing by naming that address — so writing the explicit
+    form would change seven fields to tell a client exactly what it is already
+    being told. A first push should be able to prove itself a no-op; churning
+    config to restate the status quo destroys that property and makes the
+    gateway's UI look edited for no reason.
+    """
     want = {'dhcpd_start': scope['start'], 'dhcpd_stop': scope['end'],
             'dhcpd_leasetime': scope['lease']}
     opts = scope['options']
-    if opts.get('gateway'):
+    own = _own_ip(raw)
+    if opts.get('gateway') and not (opts['gateway'] == own
+                                    and not raw.get('dhcpd_gateway_enabled')):
         want.update({'dhcpd_gateway_enabled': True,
                      'dhcpd_gateway': opts['gateway']})
-    if opts.get('dns'):
+    dns_is_implicit = (str(opts.get('dns') or '') == own
+                       and not raw.get('dhcpd_dns_enabled'))
+    if opts.get('dns') and not dns_is_implicit:
         servers = [d for d in str(opts['dns']).split(',') if d][:4]
         want['dhcpd_dns_enabled'] = True
         for i in range(1, 5):
