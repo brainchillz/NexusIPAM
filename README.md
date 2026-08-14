@@ -16,6 +16,17 @@ the tools to check it against **what is actually true** on the wire:
 4. **reconcile** — find hosts answering pings that nobody recorded, and records
    for machines that no longer answer.
 
+It can also **make** the plan true, rather than only describing it: each
+address carries an ordered list of DNS names, and Nexus IPAM renders those and
+pushes them to the servers that answer queries — DNSMAQ-MGR nodes, or a UniFi
+gateway's Static DNS. Provisioning a host becomes one call that allocates an
+address, names it, and publishes it everywhere; deprovisioning removes all
+three. Every target is pushed independently, and the servers keep serving from
+local state, so Nexus IPAM being down never affects name resolution.
+
+Push is entirely optional — configure no targets and it stays a pure record of
+your address plan.
+
 ---
 
 ## Screenshots
@@ -89,6 +100,40 @@ chance of a stale tree.
   with the gateway flagged; click any cell to see everything known about it.
 - Bulk import (paste `IP hostname MAC` lines), CSV export, bulk span
   reservation (`.1`–`.20` for infrastructure in one call).
+
+### Names — several per address, in order
+One address carrying several names is a **first-class shape**, not an anomaly:
+parallel A records are how a box that runs six services gets six names, and
+collapsing them into one field loses information every DNS server already
+holds. So names live in their own ordered list per address:
+
+- **Position 0 is canonical.** It is what a DNS server answers for the
+  reverse (PTR) lookup, and it is mirrored into the address's `dns_name` as a
+  cache, so every list, search, export and importer keeps working unchanged.
+- Each name carries its own **type** (`a` or `cname`), **comment**, **enabled**
+  flag and **`ext_id`** — the last preserving the DNS server's own record id,
+  which is what lets an import and a push back out reproduce a zone exactly
+  rather than approximately.
+- Reorder, add, disable or remove them in the address editor, or through
+  `GET`/`POST /api/addresses/<id>/names`.
+
+Disabling a name keeps it recorded and stops publishing it — the difference
+between "we are not using this yet" and "delete it and forget it existed".
+
+### Provision and deprovision
+The two operations that actually change the world, each one action:
+
+- **Provision** — take the next free address in a network, record it with its
+  name and aliases, and push DNS to every enforcement node. The response
+  carries the same L3 facts as `/api/allocate`, so a deployment tool can go
+  straight from this to building a machine that boots with working forward
+  *and* reverse DNS.
+- **Deprovision** — names removed, address released (or parked as
+  `deprecated` with `keep`), every node updated. This is the half that gets
+  skipped by hand, and skipping it is why stale DNS exists everywhere.
+
+Provision refuses a name that already resolves somewhere else rather than
+silently creating round-robin, so a typo fails loudly instead of quietly.
 
 ### Free-space and ping verification
 - Free list per network, excluding records, DHCP pools and the gateway.
@@ -191,6 +236,24 @@ sudo ./install.sh
 Installs to `/opt/nexus-ipam`, runs as the unprivileged `nexusipam` user under
 systemd. No sudoers rules are needed — the app never runs a privileged command.
 
+### Upgrading
+
+In place, and there is no separate migration step:
+
+```bash
+sudo ./install.sh                                  # bare metal — re-run it
+docker compose up -d --build                       # Docker
+```
+
+`install.sh` replaces only the code and reuses the existing venv; `ipam.db`,
+`auth.json` and `certs/` are never touched. Schema changes are additive and
+applied at startup — new columns and tables are created, existing rows are
+migrated forward, and an older database opens without any action from you.
+
+Migration runs *before* the startup backup, so that backup reflects the new
+schema. **Copy `ipam.db` yourself before a version jump** if you want a
+restore point that predates it — downgrading is not supported.
+
 ### Configuration
 
 Everything is a `NEXUSIPAM_*` environment variable:
@@ -199,9 +262,14 @@ Everything is a `NEXUSIPAM_*` environment variable:
 |---|---|---|
 | `NEXUSIPAM_DATA_DIR` | app dir | Where `ipam.db`, `auth.json` and `certs/` live |
 | `NEXUSIPAM_DB` | `$DATA_DIR/ipam.db` | Database file |
+| `NEXUSIPAM_AUTH_FILE` | `$DATA_DIR/auth.json` | Users, API tokens and the session secret (mode 0600) |
 | `NEXUSIPAM_PORT` | `8444` (`8081` if TLS off) | Web/API port |
 | `NEXUSIPAM_TLS` | `1` | `0` serves plain HTTP (behind a TLS proxy) |
+| `NEXUSIPAM_TLS_DIR` | `$DATA_DIR/certs` | Where a generated certificate is kept |
+| `NEXUSIPAM_TLS_CERT` / `_KEY` | `$TLS_DIR/nexus-ipam.{crt,key}` | Point these at your own certificate instead |
+| `NEXUSIPAM_COOKIE_SECURE` | follows `TLS` | Force the session cookie's `Secure` flag on or off — set `1` when TLS terminates at a proxy in front |
 | `NEXUSIPAM_ADMIN_PASSWORD` | — | Skips the generated first-run password |
+| `NEXUSIPAM_NO_SUDO` | `0` (`1` in Docker) | Never prefix `sudo` on the few commands run (`ping`, `ip neigh`) |
 | `NEXUSIPAM_SCAN_WORKERS` | `64` | Ping concurrency |
 | `NEXUSIPAM_SCAN_TIMEOUT` | `1.0` | Seconds to wait per probe |
 | `NEXUSIPAM_SCAN_MAX_HOSTS` | `4096` | Ceiling on one scan job |
@@ -295,6 +363,67 @@ Pass `dry_run: true` to see what *would* be allocated without writing.
 `POST /api/release` frees it again (or `keep: true` to retire it as
 `deprecated`).
 
+### Provisioning (allocate + name + publish, in one call)
+
+`/api/allocate` claims an address. `/api/provision` goes further: it also
+records the names and pushes DNS, so the machine you are about to build
+resolves before it boots.
+
+```bash
+curl -sk -H "$AUTH" -H 'Content-Type: application/json' -X POST \
+  "$BASE/api/provision" -d '{
+    "name": "web01.lab.lan",
+    "network": "lab-servers",
+    "aliases": ["www.lab.lan", "intranet.lab.lan"],
+    "mac": "aa:bb:cc:00:11:22",
+    "assigned_kind": "vm", "assigned_id": 12
+  }'
+```
+
+The response carries the allocation, the resulting ordered name list, the same
+L3 facts `/api/allocate` returns, and the per-target push outcome. `verify`
+ping-checks the candidate first; `push: false` records everything without
+publishing.
+
+Tearing down is the mirror image, by name, address or id:
+
+```bash
+curl -sk -H "$AUTH" -X POST "$BASE/api/deprovision" \
+  -d '{"name": "web01.lab.lan"}'          # + "keep": true to park it deprecated
+```
+
+### Names on an address
+
+```bash
+GET  /api/addresses/<id>/names
+POST /api/addresses/<id>/names   {"names": [ ... ]}
+```
+
+The POST **replaces the whole ordered list** — list order becomes position, so
+the first entry is canonical. Entries may be bare strings or objects:
+
+```json
+{"names": [
+  "docker.lab.lan",
+  {"name": "registry.lab.lan", "comment": "pull-through cache"},
+  {"name": "old.lab.lan", "enabled": false}
+]}
+```
+
+### Pushing DNS
+
+```
+GET    /api/push                 targets, serial, what would be published
+GET    /api/push/preview         the exact payload, without sending it
+POST   /api/push/run             push every enabled target (+ ?target=<name>)
+POST   /api/push/targets         create or update a target
+DELETE /api/push/targets/<name>  stop pushing there (the node keeps what it has)
+```
+
+A target update is partial in the same way resources are: omit `token` or
+`unifi_password` and the stored secret is kept, so changing one flag never
+means re-entering a credential.
+
 ### Update semantics — partial and safe
 
 `POST /api/<resource>/<id>` is a **partial update**: any field you do not send
@@ -366,7 +495,11 @@ timestamp, across every table, plus a `now` value to use as the next `since`.
 That is enough to keep an external system in step without re-reading
 everything.
 
-### DNSMAQ-MGR
+### DNSMAQ-MGR — exports (pull)
+
+If you want Nexus IPAM to *drive* dnsmasq rather than feed a script of your
+own, skip to **DNS push targets** below — that needs no glue at all. These
+exports are for the pull direction, and for anything that is not DNSMAQ-MGR.
 
 The dnsmasq exports emit *exactly* the JSON bodies DNSMAQ-MGR's own endpoints
 accept, so syncing is fetch-here / post-there with no translation:
@@ -379,6 +512,9 @@ accept, so syncing is fetch-here / post-there with no translation:
 | `GET /api/export/zone?domain=lab.lan` | → | any BIND-style zone |
 
 Bare hostnames are qualified with their network's domain on the way out.
+**Push does not do this** — it publishes each name exactly as recorded, since
+the ordered name list is meant to round-trip a zone byte-for-byte. Record
+names fully qualified if you push, and the two paths agree.
 
 ### DNS push targets
 
@@ -416,9 +552,6 @@ Two UniFi behaviours are worth knowing before enabling that kind:
   so a first sync only adds and updates. Turning it on makes Nexus IPAM
   authoritative over the gateway's whole A/AAAA table.
 
-`POST /api/provision` chains the whole thing — next free address, names,
-push — into one call, and `POST /api/deprovision` is its exact inverse.
-
 ### VC-Deployer
 
 The allocation response maps one-to-one onto `DeploySpec`
@@ -427,19 +560,35 @@ portgroup name for `vm.clone -net`. A deploy becomes: allocate → clone →
 `POST /api/vms?upsert=1` to record what was built. `POST /api/release` on
 teardown.
 
+With DNS push configured, use `/api/provision` in place of `/api/allocate` and
+the clone starts with its name already live on every DNS node — then
+`/api/deprovision` on teardown *or on a failed clone*, which is what stops a
+failed deploy from leaving a record behind.
+
 ### Importers
 
 `tools/` holds the inbound half of the integrations (exports.py is outbound):
 
 | Tool | Pulls | Notes |
 |---|---|---|
-| `import_dnsmasq.py` | DNS host records from a DNSMAQ-MGR primary | collapses many names per address into one record + `meta.aliases`; PTR match picks the canonical name |
+| `import_dnsmasq.py` | DNS host records from a DNSMAQ-MGR primary | **lossless** — every name kept, in the node's own record order (its first entry answers PTR, so that order *is* the canonical order); per-name comment, enabled flag and record id preserved |
 | `import_unifi.py` | VLANs, networks, DHCP scopes (+ `--reservations`) from a UniFi gateway | topology only — clients are leases, the scope accounts for them |
 | `import_vcenter.py` | clusters, ESXi hosts, VMs and guest addresses from vCenter | skips vCLS agents and guest IPs outside any defined network (container bridges, CNI overlays) |
 | `import_nexuscontroller.py` | physical hosts and their classification from NexusController | groups multiple registry entries per machine; skips nodes that are really VMs |
 
-Both take `--dry-run`, are idempotent via `source`/`ext_id`, and never clobber
-fields another source or a human already set.
+All four take `--dry-run`, are idempotent via `source`/`ext_id`, and never
+clobber fields another source or a human already set. Each reports its run to
+`POST /api/sync/runs`, so a scheduled importer that starts failing shows up in
+the UI (Settings → External sources) rather than only in a log nobody reads.
+`GET /api/sync` answers "which system owns what" from the data itself — every
+row carries `source`, so ownership cannot drift from reality.
+
+Two more tools, not importers:
+
+| Tool | Does |
+|---|---|
+| `roundtrip_check.py` | Proves IPAM reproduces a DNS node's zone **exactly** — same addresses, same names in the same order, same comments, enabled flags and record ids — before you let it become the writer. Run it before the first push, not after. |
+| `seed_demo.py` | Fills a throwaway instance with the demo dataset the screenshots show. Writes freely; never point it at anything real. |
 
 ### Other exports
 
@@ -472,6 +621,15 @@ POST /api/audit/prune    admin: {"days": N} or {"all": true} — manual override
   smuggle a directive into someone else's config.
 - SQL is parameterized throughout; the only interpolated identifiers are table
   and column names from fixed internal constants, never from user input.
+- **Push target credentials** — a node's mirror token, a gateway's password —
+  are the one class of secret stored in the database rather than hashed, since
+  they must be replayed on every push. They are never returned by the API
+  (`has_token` / `has_password` booleans instead), and they live in the `meta`
+  key/value table, which is **not** one of the tables `/api/export/json` and
+  the automatic backups dump — so a dump you hand to someone else carries no
+  credentials. Treat `ipam.db` itself as sensitive.
+- Push TLS is `insecure` or pinned to a certificate fingerprint. Pinning is
+  worth the two minutes on any target that carries a password.
 
 ---
 
@@ -506,17 +664,19 @@ nexusipam/
   core/runcmd.py        shell-free command execution
   core/tls.py           self-signed generation, cert upload
   netutil.py            prefix maths, hex bounds, usable-range rules
-  pushout.py            DNS push targets, render + deliver, serials
-  unifi.py              UniFi gateway Static DNS adapter (vendored)
-  provision.py          one-action provision / deprovision
   resource.py           generic REST machinery (one implementation, ten tables)
   networks.py           VLANs, networks, containment, utilization
-  addresses.py          address records, search, lookup, bulk import
+  addresses.py          address records, search, lookup, ordered names
   allocate.py           free-space discovery, atomic allocation
   inventory.py          clusters, devices, VMs, containers, topology
   services.py           DHCP/DNS servers, DHCP ranges
   scan.py               ICMP prober, scan jobs, reconciliation
+  pushout.py            DNS push targets, render + deliver, serials
+  unifi.py              UniFi gateway Static DNS adapter (vendored)
+  provision.py          one-action provision / deprovision
   exports.py            exports, import, change feed, audit
+  sync.py               which source owns what; importer run reports
+  backup.py             scheduled JSON backups + audit retention
   stats.py              overview aggregates, search, health
 static/js/              one file per page, no build step
 templates/index.html    the single page
