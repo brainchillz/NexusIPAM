@@ -406,6 +406,22 @@ def sync_hosts(peer, hosts, client=None):
             client.logout()
 
 
+# Which sections this adapter can reconcile. Registering a section here is
+# what makes it pushable to a gateway at all — a section with no syncer is
+# skipped rather than silently reported as applied.
+#
+# Mapped to the FUNCTION NAME, resolved at call time, not to the function
+# object: binding at import would freeze whatever was defined then, so the
+# module attribute would stop being the single source of truth (and could not
+# be substituted in tests).
+SECTION_SYNCERS = {'hosts': 'sync_hosts'}
+
+
+def syncer_for(section):
+    name = SECTION_SYNCERS.get(section)
+    return globals().get(name) if name else None
+
+
 def status_line(summary):
     """Condense a sync summary into the peer store's last_status string."""
     if summary['failed']:

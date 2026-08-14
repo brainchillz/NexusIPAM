@@ -29,6 +29,10 @@ async function page_settings() {
     API.get('/api/sync').catch(() => null),
     API.get('/api/push').catch(() => null),
   ]);
+  // The add-target modal is opened from an onclick and has no access to the
+  // response, so stash what it needs. Sections come from the server rather
+  // than a hardcoded list: a section exists once something can render it.
+  pushSections = (push && push.sections) || ['hosts'];
 
   $('page-content').innerHTML = `
     <div class="page-header"><h2>Settings</h2></div>
@@ -76,10 +80,12 @@ async function page_settings() {
     </div>
     ${dataTable([
       {label: 'Target', get: t => `<strong>${escapeHtml(t.name)}</strong><br><span class="muted">${escapeHtml(t.url || '')}</span>`},
-      {label: 'Type', get: t => t.kind === 'unifi'
+      {label: 'Type', get: t => `${t.kind === 'unifi'
         ? `<span class="status-badge">UniFi gateway</span>${t.unifi_delete_extra
              ? '<br><span class="muted">authoritative</span>' : '<br><span class="muted">additive</span>'}`
-        : '<span class="status-badge">DNSMAQ-MGR</span>'},
+        : '<span class="status-badge">DNSMAQ-MGR</span>'}`},
+      {label: 'Sections', get: t => (t.sections || []).map(s =>
+        `<span class="status-badge">${escapeHtml(s)}</span>`).join(' ') || '<span class="muted">none</span>'},
       {label: 'Enabled', get: t => t.enabled ? '<span class="status-badge green">yes</span>' : '<span class="status-badge gray">no</span>'},
       {label: 'Last push', get: t => t.last
         ? `${t.last.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'}
@@ -378,7 +384,9 @@ async function showAudit() {
   ], d.audit, 'Nothing recorded yet'), {wide: true});
 }
 
-// ─── DNS push targets ───────────────────────────────────
+// ─── Push targets ───────────────────────────────────────
+let pushSections = ['hosts'];
+
 function pushTargetModal() {
   openModal('Add DNS push target', `
     <div class="form-group"><label>Type</label>
@@ -390,6 +398,12 @@ function pushTargetModal() {
       <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"></div>
     <div class="form-group"><label>URL</label>
       <input id="pt-url" class="form-control" placeholder="https://dns-node:8443" spellcheck="false"></div>
+    <div class="form-group"><label>Sections to push</label>
+      ${pushSections.map(s => `
+        <label class="checkitem" style="padding-left:0"><input class="pt-section" type="checkbox"
+          value="${escapeHtml(s)}" ${s === 'hosts' ? 'checked' : ''}> ${escapeHtml(s)}</label>`).join('')}
+      <p class="help">What this target receives. A target only gets what it subscribes to,
+        so a DNS-only node is never handed DHCP.</p></div>
 
     <div id="pt-dnsmaq">
       <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
@@ -430,6 +444,7 @@ async function pushTargetSave() {
     kind,
     name: $('pt-name').value.trim(),
     url: $('pt-url').value.trim(),
+    sections: [...document.querySelectorAll('.pt-section:checked')].map(el => el.value),
   };
   if (kind === 'unifi') {
     body.unifi_username = $('pt-user').value.trim();

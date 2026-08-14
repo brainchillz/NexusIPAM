@@ -1236,11 +1236,12 @@ def test_push_targets_and_run(client, monkeypatch):
 
     pushed = []
     monkeypatch.setattr(pushout, 'push_target',
-                        lambda t, recs, serial: (pushed.append((t['name'], serial)),
-                                                 (True, 'applied via restart'))[1])
+                        lambda t, data, serials: (pushed.append((t['name'], serials)),
+                                                  (True, 'applied via restart'))[1])
     _mk_addr(client, '10.30.0.99', dns_name='pushme.lan')
     r = client.post('/api/push/run')
-    assert r.json['success'] and r.json['serial'] == 1 and pushed == [('ns1', 1)]
+    assert r.json['success'] and r.json['serial'] == 1
+    assert pushed == [('ns1', {'hosts': 1})]
     r = client.post('/api/push/run')
     assert r.json['serial'] == 2                     # monotonic
     st = client.get('/api/push').json
@@ -1255,13 +1256,106 @@ def test_push_failure_recorded(client, monkeypatch):
     client.post('/api/push/targets',
                 json={'name': 'ns2', 'url': 'https://ns2:9443', 'token': 'dmm_x'})
     monkeypatch.setattr(pushout, 'push_target',
-                        lambda t, recs, serial: (False, 'Invalid mirror token'))
+                        lambda t, data, serials: (False, 'Invalid mirror token'))
     r = client.post('/api/push/run')
     assert r.status_code == 200 and r.json['success'] is False
     st = client.get('/api/push').json
     t = st['targets'][0]
     assert t['last']['ok'] is False and 'token' in t['last']['detail']
     assert t['serial'] == 0                          # never acked anything
+
+
+# ─── Multi-section push ───────────────────────────────────────────────
+
+def _fake_section(monkeypatch, name, payload):
+    """Register an extra renderable section for the duration of a test."""
+    from nexusipam import pushout
+    monkeypatch.setitem(pushout.SECTION_BUILDERS, name, lambda: payload)
+
+
+def test_target_defaults_to_hosts_and_rejects_unknown_sections(client):
+    r = client.post('/api/push/targets',
+                    json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    assert r.json['target']['sections'] == ['hosts']      # default, not empty
+
+    assert client.post('/api/push/targets',
+                       json={'name': 'ns2', 'url': 'https://ns2:8443', 'token': 'dmm_x',
+                             'sections': ['hosts', 'nonsense']}
+                       ).status_code == 400
+    assert client.post('/api/push/targets',
+                       json={'name': 'ns3', 'url': 'https://ns3:8443', 'token': 'dmm_x',
+                             'sections': []}
+                       ).status_code == 400
+
+
+def test_serials_are_per_section_and_do_not_cross_contaminate(client, monkeypatch):
+    from nexusipam import pushout
+    _fake_section(monkeypatch, 'dhcp', [{'x': 1}])
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x',
+                      'sections': ['hosts', 'dhcp']})
+    seen = []
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, data, serials: (seen.append(serials),
+                                                  (True, 'ok'))[1])
+    client.post('/api/push/run')
+    assert seen[-1] == {'hosts': 1, 'dhcp': 1}
+
+    # A dhcp-only run must not advance the hosts counter: otherwise "is this
+    # node's hosts section current?" stops being answerable from the serial.
+    client.post('/api/push/run?sections=dhcp')
+    assert seen[-1] == {'dhcp': 2}
+    assert client.get('/api/push').json['serials'] == {'hosts': 1, 'dhcp': 2}
+
+    client.post('/api/push/run?sections=hosts')
+    assert seen[-1] == {'hosts': 2}
+    assert client.post('/api/push/run?sections=bogus').status_code == 400
+
+
+def test_serials_carry_forward_from_the_pre_section_counter(client, monkeypatch):
+    """A node that already holds serial 14 rejects a push numbered 1 as stale,
+    so the first per-section run must continue the old global count."""
+    from nexusipam import pushout
+    from nexusipam.core import db
+    db.set_setting(pushout.SERIAL_KEY, 14)
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    seen = []
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, data, serials: (seen.append(serials), (True, 'ok'))[1])
+    client.post('/api/push/run')
+    assert seen[-1] == {'hosts': 15}
+
+
+def test_unsubscribed_target_is_skipped_not_failed(client, monkeypatch):
+    from nexusipam import pushout
+    _fake_section(monkeypatch, 'dhcp', [{'x': 1}])
+    client.post('/api/push/targets',
+                json={'name': 'dns-only', 'url': 'https://ns1:8443', 'token': 'dmm_x',
+                      'sections': ['hosts']})
+    client.post('/api/push/targets',
+                json={'name': 'both', 'url': 'https://ns2:8443', 'token': 'dmm_x',
+                      'sections': ['hosts', 'dhcp']})
+    monkeypatch.setattr(pushout, 'push_target', lambda t, data, serials: (True, 'ok'))
+    r = client.post('/api/push/run?sections=dhcp').json
+    by_name = {x['name']: x for x in r['results']}
+    assert by_name['dns-only']['skipped'] is True and by_name['dns-only']['ok'] is True
+    assert by_name['both']['sections'] == ['dhcp']
+    assert r['success'] is True
+
+
+def test_unifi_target_cannot_subscribe_to_an_unsupported_section(client, monkeypatch):
+    """KIND_SECTIONS is the guard. A gateway *can* carry dhcp (its API exposes
+    the scope options), so the check must reject only genuinely unsupported
+    combinations, not everything that is not hosts."""
+    from nexusipam import pushout
+    _fake_section(monkeypatch, 'dhcp', [])
+    monkeypatch.setitem(pushout.KIND_SECTIONS, 'unifi', ('hosts',))
+    r = client.post('/api/push/targets',
+                    json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi',
+                          'unifi_username': 'admin', 'unifi_password': 'pw',
+                          'sections': ['dhcp']})
+    assert r.status_code == 400 and 'cannot carry' in r.json['error']
 
 
 # ─── UniFi gateway targets ────────────────────────────────────────────
@@ -1412,8 +1506,8 @@ def test_target_stored_without_kind_still_pushes_as_dnsmaq(client, monkeypatch):
     assert client.get('/api/push').json['targets'][0]['kind'] == 'dnsmaq'
     kinds = []
     monkeypatch.setattr(pushout, 'push_target',
-                        lambda t, recs, serial: (kinds.append(t.get('kind')),
-                                                 (True, 'ok'))[1])
+                        lambda t, data, serials: (kinds.append(t.get('kind')),
+                                                  (True, 'ok'))[1])
     assert client.post('/api/push/run').json['success']
     assert kinds == [None]                   # dispatch defaults, store untouched
 

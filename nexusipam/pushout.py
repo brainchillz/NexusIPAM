@@ -35,20 +35,31 @@ from .core.validators import RE_SLUG, clean_text
 bp = Blueprint('pushout', __name__)
 
 TARGETS_KEY = 'push_targets'
-SERIAL_KEY = 'push_serial'
+SERIAL_KEY = 'push_serial'          # legacy scalar; per-section counters below
+SERIALS_KEY = 'push_serials'
 SOURCE_NAME = 'nexus-ipam'          # how this IPAM identifies itself to nodes
 PUSH_TIMEOUT = 30
 
 # Two kinds of target:
 #   'dnsmaq' — a DNSMAQ-MGR node, which receives the mirror payload on its own
-#     API and locks the pushed section read-only.
-#   'unifi'  — a UniFi Cloud Gateway, which has no mirror endpoint: its Static
-#     DNS is reconciled against our records by the unifi adapter. Push-only,
-#     hosts-equivalent data only, and nothing there to lock.
+#     API and locks each pushed section read-only.
+#   'unifi'  — a UniFi Cloud Gateway, which has no mirror endpoint: its state
+#     is reconciled object by object by the unifi adapter. Push-only; there is
+#     nothing to lock, so the gateway's UI stays editable and drift is possible.
 # Reaching the gateway directly (rather than via a DNSMAQ-MGR node re-pushing
 # downstream) is the same rule already applied to ns1/ns2: every target is
 # pushed independently, so no target's freshness depends on another being up.
 KINDS = ('dnsmaq', 'unifi')
+
+# Which sections each kind can carry. A UniFi gateway serves both DNS and
+# DHCP and its API exposes both (rest/networkconf holds the dhcpd_* scope
+# options, rest/user the fixed reservations) — the earlier hosts-only limit
+# was inherited from DNSMAQ-MGR's adapter, where it described that adapter's
+# scope rather than anything about UniFi.
+KIND_SECTIONS = {
+    'dnsmaq': ('hosts', 'dhcp'),
+    'unifi': ('hosts', 'dhcp'),
+}
 
 # DNSMAQ-MGR record ids (h_xxxxxx) — only ids of this shape survive its
 # mirror-receive `_keep_id`; anything else gets a fresh id there.
@@ -81,6 +92,63 @@ def build_hosts():
     return records
 
 
+# A section exists once something can render it. Declaring the name before the
+# renderer lands would let a target subscribe to a section that silently
+# pushes nothing, so the registry IS the list of valid sections.
+SECTION_BUILDERS = {'hosts': build_hosts}
+
+
+def sections_available():
+    return tuple(SECTION_BUILDERS)
+
+
+def sections_for(target):
+    """What this target should actually receive: what it subscribed to, kept
+    to what its kind can carry and what we can render today. Targets stored
+    before sections existed carry none, and mean 'hosts' — that is what they
+    were created to do."""
+    subs = target.get('sections') or ['hosts']
+    kind = target.get('kind') or 'dnsmaq'
+    allowed = KIND_SECTIONS.get(kind, ('hosts',))
+    return [s for s in subs if s in allowed and s in SECTION_BUILDERS]
+
+
+def build_sections(names):
+    return {s: SECTION_BUILDERS[s]() for s in names if s in SECTION_BUILDERS}
+
+
+# ─── Serials ──────────────────────────────────────────────────────────
+# One counter PER SECTION. A single global counter was fine while `hosts` was
+# the only section, but the moment there are two, a dhcp-only change bumps the
+# number `hosts` is judged by and "is this node current?" stops being
+# answerable. The scalar `serial` is still sent, as the max, because
+# DNSMAQ-MGR's receiver accepts both shapes.
+
+def _serials():
+    try:
+        s = json.loads(db.get_setting(SERIALS_KEY, '{}') or '{}')
+        return s if isinstance(s, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _bump_serials(names):
+    """Advance the counter for each named section; returns {section: serial}."""
+    with db.WRITE_LOCK:
+        cur = _serials()
+        if not cur:
+            # First run after the upgrade: carry the old global counter forward
+            # so serials never appear to go backwards to a node that already
+            # holds a higher one (it would reject the push as stale).
+            legacy = int(db.get_setting(SERIAL_KEY, '0') or 0)
+            cur = {s: legacy for s in sections_available()}
+        for s in names:
+            cur[s] = int(cur.get(s, 0)) + 1
+        db.set_setting(SERIALS_KEY, json.dumps(cur))
+        db.set_setting(SERIAL_KEY, max(cur.values()) if cur else 0)
+    return {s: cur[s] for s in names}
+
+
 # ─── Targets (meta-backed) ────────────────────────────────────────────
 
 def _targets():
@@ -99,6 +167,7 @@ def _public(t):
     """Target as the UI sees it — every secret reduced to a boolean."""
     out = dict(t)
     out.setdefault('kind', 'dnsmaq')
+    out['sections'] = sections_for(t)
     out['has_token'] = bool(out.pop('token', ''))
     out['has_password'] = bool(out.pop('unifi_password', ''))
     return out
@@ -123,8 +192,9 @@ def _check_fingerprint(url, want):
     return None
 
 
-def _push_unifi(target, records):
-    """Reconcile a gateway's Static DNS against our records. Returns (ok, detail).
+def _push_unifi(target, data):
+    """Reconcile a gateway's state against ours, section by section.
+    Returns (ok, detail).
 
     Unlike a mirror push — one request, applied or refused whole — this is
     list/diff/N-writes, so individual records can fail while the rest land.
@@ -138,34 +208,48 @@ def _push_unifi(target, records):
     # adapter's own default is 'system' — which would fail against the
     # gateway's self-signed cert. Match this module's default instead.
     peer['verify'] = target.get('verify') or 'insecure'
-    try:
-        s = unifi.sync_hosts(peer, records)
-    except Exception as e:                       # unreachable, login refused, …
-        return False, str(e)
-    parts = ['%d created' % s['created'], '%d updated' % s['updated'],
-             '%d deleted' % s['deleted'], '%d unchanged' % s['unchanged']]
-    if s['claimed']:
-        parts.append('%d claimed from client DNS' % s['claimed'])
-    if s['covered']:
-        parts.append('%d already covered by client DNS' % s['covered'])
-    detail = ', '.join(parts)
-    if s['failed'] or s['conflicts']:
-        return False, '%s (%s)' % (unifi.status_line(s), detail)
-    return True, detail
+    parts, ok = [], True
+    for section, payload in data.items():
+        syncer = unifi.syncer_for(section)
+        if syncer is None:
+            continue
+        try:
+            s = syncer(peer, payload)
+        except Exception as e:                   # unreachable, login refused, …
+            return False, str(e)
+        bits = ['%d created' % s['created'], '%d updated' % s['updated'],
+                '%d deleted' % s['deleted'], '%d unchanged' % s['unchanged']]
+        if s.get('claimed'):
+            bits.append('%d claimed from client DNS' % s['claimed'])
+        if s.get('covered'):
+            bits.append('%d already covered by client DNS' % s['covered'])
+        line = ', '.join(bits)
+        if s['failed'] or s['conflicts']:
+            ok = False
+            line = '%s (%s)' % (unifi.status_line(s), line)
+        parts.append('%s: %s' % (section, line) if len(data) > 1 else line)
+    if not parts:
+        return True, 'nothing to sync'
+    return ok, ' · '.join(parts)
 
 
-def push_target(target, records, serial):
-    """One push to one target. Returns (ok, detail)."""
+def push_target(target, data, serials):
+    """One push to one target. `data` is {section: payload}, `serials` the
+    matching {section: n}. Returns (ok, detail)."""
     if target.get('kind') == 'unifi':
-        return _push_unifi(target, records)
+        return _push_unifi(target, data)
     verify = target.get('verify') or 'insecure'
     if verify.startswith('fingerprint:'):
         e = _check_fingerprint(target['url'], verify.split(':', 1)[1])
         if e:
             return False, e
-    payload = {'source': SOURCE_NAME, 'serial': serial,
-               'serials': {'hosts': serial}, 'sections': ['hosts'],
-               'data': {'hosts': records}}
+    # The scalar `serial` is the max across sections: DNSMAQ-MGR's receiver
+    # reads the per-section map when present and falls back to the scalar,
+    # and its own peers send exactly this shape.
+    payload = {'source': SOURCE_NAME,
+               'serial': max(serials.values()) if serials else 0,
+               'serials': dict(serials), 'sections': sorted(data),
+               'data': dict(data)}
     req = urllib.request.Request(
         target['url'].rstrip('/') + '/api/mirror/receive',
         data=json.dumps(payload).encode(), method='POST',
@@ -192,10 +276,14 @@ def push_target(target, records, serial):
 
 @bp.route('/api/push')
 def push_status():
-    records = build_hosts()
+    counts = {s: len(b()) for s, b in SECTION_BUILDERS.items()}
     return jsonify({'targets': [_public(t) for t in _targets()],
+                    'sections': list(sections_available()),
+                    'serials': _serials(),
+                    'counts': counts,
                     'serial': int(db.get_setting(SERIAL_KEY, '0') or 0),
-                    'record_count': len(records),
+                    # `record_count` predates sections and means hosts.
+                    'record_count': counts.get('hosts', 0),
                     'address_count': db.query_one(
                         'SELECT COUNT(DISTINCT address_id) c FROM ip_names '
                         "WHERE enabled=1 AND rtype='a'")['c']})
@@ -269,6 +357,24 @@ def push_target_save():
             return err('A mirror token is required (generate one on the node: '
                        'Mirroring → receive token)')
 
+    if 'sections' in data or not cur:
+        # Absent means "the default"; an explicit [] means "receive nothing",
+        # which is not a target — say so instead of quietly substituting.
+        raw = data['sections'] if data.get('sections') is not None else ['hosts']
+        if not isinstance(raw, list):
+            return err('sections must be a list')
+        subs = [str(s).strip().lower() for s in raw if str(s).strip()]
+        if not subs:
+            return err('A target must subscribe to at least one section')
+        unknown = [s for s in subs if s not in SECTION_BUILDERS]
+        if unknown:
+            return err('Unknown section(s): %s (have: %s)'
+                       % (', '.join(unknown), ', '.join(sections_available())))
+        wrong = [s for s in subs if s not in KIND_SECTIONS[kind]]
+        if wrong:
+            return err('A %s target cannot carry: %s' % (kind, ', '.join(wrong)))
+        t['sections'] = sorted(set(subs))
+
     if 'verify' in data:
         v = str(data.get('verify') or 'insecure').strip()
         if v != 'insecure':
@@ -306,41 +412,83 @@ def push_target_delete(name):
     return jsonify({'success': True})
 
 
-def run_push(only=''):
-    """Push the hosts section to every enabled target (or one, by name).
-    One serial per run: every node that acks it holds the same zone.
-    Returns a result dict, or (None, error) when no target matches — shared
-    by the route below and the provision workflow."""
+def run_push(only='', sections=None):
+    """Push to every enabled target (or one, by name).
+
+    `sections` limits the run; the default is everything renderable. Each
+    target receives only what it subscribes to, so a DNS-only node is not
+    handed DHCP just because a scope changed.
+
+    Serials advance PER SECTION, once per run, and every target that acks a
+    section holds the same version of it. Returns a result dict, or
+    (None, error) when no target matches — shared by the route below and the
+    provision workflow.
+    """
     targets = _targets()
     picked = [t for t in targets
               if (t['name'] == only if only else t.get('enabled', True))]
     if not picked:
         return None, 'No matching push target — configure one first'
-    records = build_hosts()
-    with db.WRITE_LOCK:
-        serial = int(db.get_setting(SERIAL_KEY, '0') or 0) + 1
-        db.set_setting(SERIAL_KEY, serial)
+
+    wanted = [s for s in (sections or sections_available())
+              if s in SECTION_BUILDERS]
+    # Only advance a section's serial if something is actually going to
+    # receive it — an unsubscribed section must not inflate the counter.
+    live = sorted({s for t in picked for s in sections_for(t) if s in wanted})
+    if not live:
+        return None, ('No matching target subscribes to %s'
+                      % ', '.join(wanted or ['any section']))
+    data = build_sections(live)
+    serials = _bump_serials(live)
+
     results = []
     for t in picked:
-        ok, detail = push_target(t, records, serial)
-        t['last'] = {'ts': db.now(), 'ok': ok, 'detail': detail, 'serial': serial}
+        subs = [s for s in sections_for(t) if s in live]
+        if not subs:
+            results.append({'name': t['name'], 'ok': True, 'skipped': True,
+                            'sections': [], 'detail': 'not subscribed'})
+            continue
+        ok, detail = push_target(t, {s: data[s] for s in subs},
+                                 {s: serials[s] for s in subs})
+        t['last'] = {'ts': db.now(), 'ok': ok, 'detail': detail,
+                     'sections': subs,
+                     'serials': {s: serials[s] for s in subs},
+                     'serial': max(serials[s] for s in subs)}
         if ok:
-            t['serial'] = serial
-        results.append({'name': t['name'], 'ok': ok, 'detail': detail})
+            held = dict(t.get('serials') or {})
+            held.update({s: serials[s] for s in subs})
+            t['serials'] = held
+            t['serial'] = max(held.values())
+        results.append({'name': t['name'], 'ok': ok, 'detail': detail,
+                        'sections': subs})
+    counts = {s: len(data[s]) for s in live}
     with db.WRITE_LOCK:
         _save_targets(targets)
         db.audit(actor(), 'push-run', 'push', None,
-                 'serial %d, %d record(s) → %s' % (serial, len(records),
-                 ', '.join('%s:%s' % (r['name'], 'ok' if r['ok'] else 'FAIL')
-                           for r in results)))
+                 '%s → %s' % (', '.join('%s serial %d (%d)'
+                                        % (s, serials[s], counts[s]) for s in live),
+                              ', '.join('%s:%s' % (r['name'],
+                                                   'skip' if r.get('skipped')
+                                                   else ('ok' if r['ok'] else 'FAIL'))
+                                        for r in results)))
     return {'success': all(r['ok'] for r in results),
-            'serial': serial, 'records': len(records),
+            'sections': live, 'serials': serials, 'counts': counts,
+            # Back-compat with callers (and the UI) written when `hosts` was
+            # the only section and there was one number to show.
+            'serial': max(serials.values()),
+            'records': counts.get('hosts', 0),
             'results': results}, None
 
 
 @bp.route('/api/push/run', methods=['POST'])
 def push_run():
-    out, e = run_push((request.args.get('target') or '').strip())
+    raw = (request.args.get('sections') or '').strip()
+    sections = [s for s in raw.replace(',', ' ').split() if s] or None
+    if sections:
+        bad = [s for s in sections if s not in SECTION_BUILDERS]
+        if bad:
+            return err('Unknown section(s): %s' % ', '.join(bad))
+    out, e = run_push((request.args.get('target') or '').strip(), sections)
     if e:
         return err(e)
     return jsonify(out)
