@@ -1818,11 +1818,14 @@ def test_adopt_keeps_a_defined_but_disabled_scope(client):
     assert db.query_one('SELECT enabled FROM dhcp_ranges')['enabled'] == 0
 
 
-def test_pull_route_rejects_a_dnsmaq_target(client):
+def test_pull_route_needs_a_credential_or_a_real_target(client):
+    # A dnsmaq target without a read token cannot be read — the mirror token
+    # is write-only on the node by design (with one, pulling works: see
+    # test_pull_from_a_dnsmaq_node_needs_the_read_token).
     client.post('/api/push/targets',
                 json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
     r = client.post('/api/push/targets/ns1/pull')
-    assert r.status_code == 400 and 'UniFi' in r.json['error']
+    assert r.status_code == 400 and 'read token' in r.json['error']
     assert client.post('/api/push/targets/nope/pull').status_code == 404
 
 
@@ -2032,6 +2035,48 @@ def test_name_adopt_rules(client, monkeypatch):
     assert {'nas.example.net', 'web.example.net', 'media.example.net'} <= rendered
 
 
+def test_dnsmaq_leases_need_a_read_token_and_skip_statics(client, monkeypatch):
+    """The mirror token is write-only on the node by design, so lease polling
+    needs the separate read token; static (reservation-held) MACs are skipped
+    like the UniFi reader skips fixed-IP clients."""
+    from nexusipam import leases
+
+    # DNSMAQ's /api/dhcp/leases shape -> overlay items, statics dropped.
+    body = {'leases': [
+        {'expiry': 1755100000, 'mac': 'AA:BB:CC:00:74:01', 'ip': '10.74.0.20',
+         'hostname': 'dyn', 'static': False},
+        {'expiry': 1755100000, 'mac': 'aa:bb:cc:00:74:02', 'ip': '10.74.0.21',
+         'hostname': 'resv', 'static': True},
+        {'expiry': 0, 'mac': 'aa:bb:cc:00:74:03', 'ip': '', 'hostname': ''},
+    ]}
+    assert leases.dnsmaq_lease_items(body) == [
+        {'ip': '10.74.0.20', 'mac': 'aa:bb:cc:00:74:01',
+         'hostname': 'dyn', 'expires': 1755100000}]
+
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    r = client.post('/api/push/targets/ns1/leases')
+    assert r.status_code == 400 and 'read token' in r.json['error']
+
+    # Adding the read token makes the node pollable; secrets stay booleans.
+    r = client.post('/api/push/targets',
+                    json={'name': 'ns1', 'read_token': 'dm_readonly'})
+    assert r.json['target']['has_read_token'] is True
+    assert 'read_token' not in r.json['target']
+    monkeypatch.setattr(leases, 'read_dnsmaq_leases',
+                        lambda t: [{'ip': '10.74.0.30', 'mac': 'aa:bb:cc:00:74:05',
+                                    'hostname': 'polled', 'expires': 0}])
+    r = client.post('/api/push/targets/ns1/leases')
+    assert r.status_code == 200 and r.json['leases'] == 1
+    rows = client.get('/api/leases').get_json()['leases']
+    assert [(l['address'], l['source']) for l in rows] == [('10.74.0.30', 'ns1')]
+
+    # refresh_all now includes it, and an empty save keeps the stored token.
+    client.post('/api/push/targets', json={'name': 'ns1', 'read_token': ''})
+    report = leases.refresh_all()
+    assert report == [{'target': 'ns1', 'ok': True, 'leases': 1, 'expired': 0}]
+
+
 def test_leases_are_not_in_the_backup_set():
     """Observed state is re-observed, not restored — and a stale lease table
     restored into a live instance would describe a network that has moved on."""
@@ -2082,7 +2127,10 @@ def test_serials_are_per_section_and_do_not_cross_contaminate(client, monkeypatc
     payload[0]['x'] = 2
     client.post('/api/push/run?sections=dhcp')
     assert seen[-1] == {'dhcp': 2}
-    assert client.get('/api/push').json['serials'] == {'hosts': 1, 'dhcp': 2}
+    serials = client.get('/api/push').json['serials']
+    # Exact keys are not asserted: a new renderable section (netboot, …)
+    # legitimately appears at 0 without having been pushed.
+    assert serials['hosts'] == 1 and serials['dhcp'] == 2
 
     # And an unchanged hosts payload keeps its version.
     client.post('/api/push/run?sections=hosts')
@@ -2127,6 +2175,103 @@ def test_serials_carry_forward_from_the_pre_section_counter(client, monkeypatch)
                         lambda t, data, serials: (seen.append(serials), (True, 'ok'))[1])
     client.post('/api/push/run')
     assert seen[-1] == {'hosts': 15}
+
+
+def test_dnsmaq_store_round_trips_through_adopt(client):
+    """build_dhcp emits DNSMAQ's own store shapes, so its output fed through
+    the dnsmaq state mapper must reproduce the plan's facts — the same
+    round-trip-fidelity bar the DNS side had to clear before authoring."""
+    from nexusipam import adopt, pushout
+    nid = mknet(client, '10.78.0.0/24', name='labnet', gateway='10.78.0.1',
+                dns_servers='10.78.0.53, 10.78.0.54', domain='lab.example.net')
+    client.post('/api/dhcp/ranges',
+                json={'network_id': nid, 'start_addr': '10.78.0.100',
+                      'end_addr': '10.78.0.200', 'lease_time': '24h'})
+    client.post('/api/dhcp/options',
+                json={'network_id': nid, 'option': 'option:ntp-server',
+                      'value': '10.78.0.5'})
+    client.post('/api/addresses',
+                json={'address': '10.78.0.10', 'mac': 'aa:bb:cc:00:78:01',
+                      'dns_name': 'nas.lab.example.net', 'is_reservation': True})
+
+    state = adopt.dnsmaq_state(pushout.build_dhcp())
+    assert len(state['networks']) == 1
+    n = state['networks'][0]
+    assert n['cidr'] == '10.78.0.0/24'
+    assert n['gateway'] == '10.78.0.1'
+    assert n['dns'] == ['10.78.0.53', '10.78.0.54']
+    assert n['domain'] == 'lab.example.net'
+    assert n['options'] == {'option:ntp-server': '10.78.0.5'}
+    assert n['range'] == {'start': '10.78.0.100', 'end': '10.78.0.200',
+                          'lease': '24h', 'enabled': True}
+    assert state['reservations'] == [{'mac': 'aa:bb:cc:00:78:01',
+                                      'ip': '10.78.0.10', 'hostname': 'nas',
+                                      'ext_id': ''}]
+    # Re-adopting our own render changes nothing — everything is kept.
+    report = adopt.adopt_snapshot(state, source='roundtrip')
+    assert not report['errors']
+    assert report['networks_kept'] == ['10.78.0.0/24']
+    assert report['ranges_kept'] and report['options_kept']
+    assert report['reservations_kept'] == ['10.78.0.10']
+
+
+def test_pull_from_a_dnsmaq_node_needs_the_read_token(client, monkeypatch):
+    from nexusipam import adopt
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    r = client.post('/api/push/targets/ns1/pull')
+    assert r.status_code == 400 and 'read token' in r.json['error']
+
+    client.post('/api/push/targets', json={'name': 'ns1', 'read_token': 'dm_r'})
+    monkeypatch.setattr(adopt, 'read_dnsmaq_state',
+                        lambda t: {'networks': [
+                            {'cidr': '10.79.0.0/24', 'ext_id': 'r_aaaaaa',
+                             'name': 'pool', 'vlan': None, 'gateway': '10.79.0.1',
+                             'domain': '', 'dns': [], 'options': {},
+                             'range': {'start': '10.79.0.50', 'end': '10.79.0.99',
+                                       'lease': '12h', 'enabled': False}}],
+                            'reservations': []})
+    r = client.post('/api/push/targets/ns1/pull?dry_run=1')
+    assert r.json['dry_run'] and r.json['state']['networks'][0]['cidr'] == '10.79.0.0/24'
+    r = client.post('/api/push/targets/ns1/pull')
+    assert r.json['networks_created'] == ['10.79.0.0/24']
+    assert r.json['ranges_created'] == ['10.79.0.50-10.79.0.99']
+
+
+def test_netboot_section_renders_from_the_pxe_options(client):
+    """PXE is recorded once (tftp + bootfile options per network) and renders
+    to DNSMAQ's own netboot model — dhcp-boot, not options 66/67, which many
+    PXE ROMs ignore. Half a pair renders nothing; identical pairs collapse."""
+    from nexusipam import pushout
+    a = mknet(client, '10.75.0.0/24', name='lab "quoted"')
+    b = mknet(client, '10.76.0.0/24', name='second')
+    c = mknet(client, '10.77.0.0/24', name='half-configured')
+    for nid, opts in ((a, {'option:tftp-server': '10.75.0.9',
+                           'option:bootfile-name': 'netboot.xyz.kpxe'}),
+                      (b, {'option:tftp-server': '10.75.0.9',
+                           'option:bootfile-name': 'netboot.xyz.kpxe'}),
+                      (c, {'option:tftp-server': '10.77.0.9'})):
+        for opt, val in opts.items():
+            assert client.post('/api/dhcp/options',
+                               json={'network_id': nid, 'option': opt,
+                                     'value': val}).status_code == 200
+    nb = pushout.build_netboot()
+    assert len(nb['entries']) == 1            # dedup + half-pair skipped
+    e = nb['entries'][0]
+    assert e['server'] == '10.75.0.9' and e['filename'] == 'netboot.xyz.kpxe'
+    assert '"' not in e['name']               # node refuses quoted names
+
+    # dnsmaq targets can subscribe; a gateway cannot (PXE rides in its dhcp
+    # section as dhcpd_boot_* — two copies could disagree).
+    r = client.post('/api/push/targets',
+                    json={'name': 'ns1', 'url': 'https://ns1:8443',
+                          'token': 'dmm_x', 'sections': ['hosts', 'netboot']})
+    assert r.status_code == 200
+    r = client.post('/api/push/targets',
+                    json={'name': 'gw', 'kind': 'unifi', 'url': 'https://gw',
+                          'unifi_username': 'a', 'unifi_password': 'b',
+                          'sections': ['netboot']})
+    assert r.status_code == 400 and 'cannot carry' in r.json['error']
 
 
 def test_drift_reads_the_gateway_back_and_diffs(client, monkeypatch):
@@ -2447,6 +2592,51 @@ def test_provision_carries_the_reservation_flag(client, monkeypatch):
     assert pushout.build_dhcp()['static_leases'] == []
     look = client.get('/api/addresses/lookup?address=%s' % r.json['address']).json
     assert look['record']['is_reservation'] == 0
+
+
+def test_one_mac_gets_one_reservation(client, monkeypatch):
+    """Several addresses on one NIC is normal; several RESERVATIONS on one MAC
+    is a config dnsmasq refuses to start on (past --test). Guarded at every
+    write path, and the push itself refuses legacy rows that predate the
+    guard."""
+    from nexusipam import pushout
+    from nexusipam.core import db
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, data, serials: (True, 'ok'))
+    mknet(client, '10.73.0.0/24')
+    mac = 'aa:bb:cc:00:73:01'
+    assert client.post('/api/addresses',
+                       json={'address': '10.73.0.5', 'mac': mac,
+                             'is_reservation': True}).status_code == 200
+    # Same MAC again, plain address: fine — several IPs on one NIC is normal.
+    assert client.post('/api/addresses',
+                       json={'address': '10.73.0.6', 'mac': mac}).status_code == 200
+    # But a second reservation for it is refused, naming the holder.
+    r = client.post('/api/addresses',
+                    json={'address': '10.73.0.7', 'mac': mac,
+                          'is_reservation': True})
+    assert r.status_code == 400 and '10.73.0.5' in r.json['error']
+    # Re-saving the holder itself is not a collision with itself.
+    holder = client.get('/api/addresses/search?q=10.73.0.5').json['addresses'][0]
+    assert client.post('/api/addresses/%d' % holder['id'],
+                       json={'description': 'edited'}).status_code == 200
+    # Provision path refuses too.
+    r = client.post('/api/provision',
+                    json={'name': 'dup.example.net', 'network': '10.73.0.0/24',
+                          'mac': mac, 'is_reservation': True, 'push': False})
+    assert r.status_code == 409 and '10.73.0.5' in r.json['error']
+
+    # Legacy rows that predate the guard: the push refuses the payload whole
+    # rather than delivering a store dnsmasq dies on at its next restart.
+    db.insert('ip_addresses', {
+        'address': '10.73.0.9', 'version': 4,
+        'addr_hex': '0' * 24 + '0a490009', 'status': 'reserved',
+        'mac': mac, 'is_reservation': 1, 'source': 'legacy', 'ext_id': ''})
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x',
+                      'sections': ['hosts', 'dhcp']})
+    out, e = pushout.run_push()
+    assert out is None and mac in e and 'one MAC gets one fixed lease' in e
 
 
 def test_provision_bad_alias_rolls_back_allocation(client, monkeypatch):

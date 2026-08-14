@@ -355,6 +355,64 @@ def names_adopt():
                     'refused': refused, 'errors': errors})
 
 
+def _take(opts, *keys):
+    """Pop every spelling of one option; first non-empty value wins."""
+    val = ''
+    for k in keys:
+        v = opts.pop(k, '')
+        val = val or v
+    return val
+
+
+def dnsmaq_state(store):
+    """A DNSMAQ-MGR dhcp store -> the same state shape the gateway reader
+    produces, so adopt_snapshot() handles both. dnsmasq has no network
+    objects: each range's netmask implies the prefix, and tagged options
+    carry the L3 facts. Untagged options apply to every scope — exactly how
+    dnsmasq itself treats them. Ranges without a netmask imply no derivable
+    prefix and are skipped (dnsmasq infers theirs from the interface, which
+    this side cannot see)."""
+    import ipaddress
+    by_tag = {}
+    for o in store.get('options') or []:
+        if not o.get('enabled', True):
+            continue
+        by_tag.setdefault(o.get('tag') or '', {})[
+            str(o.get('option') or '').lower()] = o.get('value') or ''
+    networks = []
+    for r in store.get('ranges') or []:
+        if not r.get('netmask'):
+            continue
+        try:
+            cidr = str(ipaddress.ip_network('%s/%s' % (r.get('start'), r['netmask']),
+                                            strict=False))
+        except ValueError:
+            continue
+        opts = dict(by_tag.get('', {}))
+        opts.update(by_tag.get(r.get('tag') or '', {}))
+        dns = _take(opts, 'option:dns-server', '6')
+        networks.append({
+            'cidr': cidr, 'ext_id': r.get('id') or '',
+            'name': r.get('tag') or '', 'vlan': None,
+            'gateway': _take(opts, 'option:router', '3'),
+            'domain': _take(opts, 'option:domain-name', '15'),
+            'dns': [d for d in str(dns).split(',') if d],
+            'options': opts,
+            'range': {'start': r.get('start'), 'end': r.get('end'),
+                      'lease': r.get('lease') or '12h',
+                      'enabled': bool(r.get('enabled', True))}})
+    reservations = [{'mac': s.get('mac') or '', 'ip': s.get('ip') or '',
+                     'hostname': s.get('hostname') or '',
+                     'ext_id': s.get('id') or ''}
+                    for s in store.get('static_leases') or []]
+    return {'networks': networks, 'reservations': reservations}
+
+
+def read_dnsmaq_state(target):
+    from .pushout import dnsmaq_get
+    return dnsmaq_state(dnsmaq_get(target, '/api/dhcp'))
+
+
 @bp.route('/api/push/targets/<name>/pull', methods=['POST'])
 def target_pull(name):
     """Adopt what a target already holds. `?dry_run=1` reads and reports
@@ -363,15 +421,19 @@ def target_pull(name):
     target = next((t for t in _targets() if t['name'] == name), None)
     if not target:
         return err('No such target', 404)
-    if (target.get('kind') or 'dnsmaq') != 'unifi':
-        return err('Only a UniFi gateway can be pulled from today — a DNSMAQ-MGR '
-                   'node is fed by this IPAM, and tools/import_dnsmasq.py seeds '
-                   'the other direction', 400)
-    from . import unifi
-    peer = dict(target)
-    peer['verify'] = target.get('verify') or 'insecure'
+    kind = target.get('kind') or 'dnsmaq'
     try:
-        state = unifi.read_state(peer)
+        if kind == 'unifi':
+            from . import unifi
+            peer = dict(target)
+            peer['verify'] = target.get('verify') or 'insecure'
+            state = unifi.read_state(peer)
+        elif target.get('read_token'):
+            state = read_dnsmaq_state(target)
+        else:
+            return err('This node has no read credential — mint a READONLY API '
+                       'token there and add it to the target as its read token '
+                       '(the mirror token is write-only by design)', 400)
     except Exception as e:
         return err('Could not read %s: %s' % (name, e), 502)
 

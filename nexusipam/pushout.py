@@ -59,7 +59,10 @@ KINDS = ('dnsmaq', 'unifi')
 # was inherited from DNSMAQ-MGR's adapter, where it described that adapter's
 # scope rather than anything about UniFi.
 KIND_SECTIONS = {
-    'dnsmaq': ('hosts', 'dhcp'),
+    # netboot is dnsmaq-only: on a UniFi gateway PXE rides inside the dhcp
+    # section as dhcpd_boot_* fields, and carrying it twice would let the two
+    # copies disagree.
+    'dnsmaq': ('hosts', 'dhcp', 'netboot'),
     'unifi': ('hosts', 'dhcp'),
 }
 
@@ -185,10 +188,53 @@ def build_dhcp():
     return {'ranges': ranges, 'static_leases': leases, 'options': options}
 
 
+def build_netboot():
+    """The `netboot` section payload, in DNSMAQ-MGR's own store shape.
+
+    Derived from each network's `option:tftp-server` + `option:bootfile-name`
+    rows — the same pair the UniFi adapter maps onto `dhcpd_boot_*` — so PXE
+    is recorded ONCE and renders to whichever server enforces it. It is its
+    own section because dnsmasq's PXE mechanism is `dhcp-boot` (the DHCP
+    header fields), not options 66/67, which many PXE ROMs ignore; shipping
+    the pair as generic options would look configured and boot nothing.
+
+    Only complete pairs render — the receiving node requires both, and half a
+    PXE config also boots nothing. Identical (server, file) pairs collapse to
+    one entry: an untagged dhcp-boot is global, so repeating it per network
+    says nothing new. Proxy-DHCP and the PXE prompt are not modelled here and
+    render as defaults — subscribing a node to `netboot` hands this app
+    authorship of that whole store, like every mirrored section.
+    """
+    nets = {n['id']: n for n in db.query('SELECT id, cidr, name FROM networks')}
+    by_net = {}
+    for o in db.query("SELECT network_id, option, value FROM dhcp_options "
+                      "WHERE enabled=1 AND option IN ('option:tftp-server', '66', "
+                      "'option:bootfile-name', '67') ORDER BY network_id, option"):
+        key = 'tftp' if o['option'] in ('option:tftp-server', '66') else 'bootfile'
+        by_net.setdefault(o['network_id'], {})[key] = o['value']
+    entries, seen = [], set()
+    for nid, opts in sorted(by_net.items()):
+        if not opts.get('bootfile') or not opts.get('tftp'):
+            continue
+        if (opts['tftp'], opts['bootfile']) in seen:
+            continue
+        seen.add((opts['tftp'], opts['bootfile']))
+        net = nets.get(nid) or {}
+        # The receiving node refuses quotes/newlines in an entry name; network
+        # names are wider than that, so squeeze rather than fail the render.
+        name = (net.get('name') or net.get('cidr') or 'net-%d' % nid)
+        name = name.replace('"', '').replace('\n', ' ').strip()[:64] or 'pxe'
+        entries.append({'name': name, 'filename': opts['bootfile'],
+                        'server': opts['tftp'], 'arches': [], 'enabled': True,
+                        'comment': 'PXE for %s' % (net.get('cidr') or 'the plan')})
+    return {'entries': entries}
+
+
 # A section exists once something can render it. Declaring the name before the
 # renderer lands would let a target subscribe to a section that silently
 # pushes nothing, so the registry IS the list of valid sections.
-SECTION_BUILDERS = {'hosts': build_hosts, 'dhcp': build_dhcp}
+SECTION_BUILDERS = {'hosts': build_hosts, 'dhcp': build_dhcp,
+                    'netboot': build_netboot}
 
 
 def section_size(payload):
@@ -304,6 +350,7 @@ def _public(t):
     out['sections'] = sections_for(t)
     out['has_token'] = bool(out.pop('token', ''))
     out['has_password'] = bool(out.pop('unifi_password', ''))
+    out['has_read_token'] = bool(out.pop('read_token', ''))
     return out
 
 
@@ -324,6 +371,23 @@ def _check_fingerprint(url, want):
     if got != want:
         return 'Certificate fingerprint mismatch (got %s…)' % got[:16]
     return None
+
+
+def dnsmaq_get(target, path):
+    """Authenticated GET against a dnsmaq target using its READ token (the
+    mirror token is write-only on the node by design), honouring the target's
+    fingerprint pinning. Raises OSError on transport or TLS problems."""
+    verify = target.get('verify') or 'insecure'
+    if verify.startswith('fingerprint:'):
+        e = _check_fingerprint(target['url'], verify.split(':', 1)[1])
+        if e:
+            raise OSError(e)
+    req = urllib.request.Request(
+        target['url'].rstrip('/') + path,
+        headers={'Authorization': 'Bearer ' + (target.get('read_token') or '')})
+    with urllib.request.urlopen(req, context=ssl._create_unverified_context(),
+                                timeout=15) as r:
+        return json.loads(r.read() or b'{}')
 
 
 def _push_unifi(target, data):
@@ -463,6 +527,7 @@ def push_target_save():
 
     if kind == 'unifi':
         t.pop('token', None)                    # gateways authenticate as a user
+        t.pop('read_token', None)               # dnsmaq-side credential
         username, e = clean_text(data.get('unifi_username'), 'Gateway username', 64)
         if e:
             return err(e)
@@ -504,6 +569,15 @@ def push_target_save():
         if not t.get('token'):
             return err('A mirror token is required (generate one on the node: '
                        'Mirroring → receive token)')
+        # Optional read-side credential. The mirror token is write-only on the
+        # node by design, so polling its leases (or adopting its DHCP state)
+        # needs a separate READONLY API token minted there. Empty = keep the
+        # stored one (like the password); an explicit null clears it.
+        if 'read_token' in data:
+            if data['read_token'] is None:
+                t.pop('read_token', None)
+            elif str(data['read_token']).strip():
+                t['read_token'] = str(data['read_token']).strip()
 
     if 'sections' in data or not cur:
         # Absent means "the default"; an explicit [] means "receive nothing",
@@ -689,6 +763,19 @@ def run_push(only='', sections=None):
         return None, ('No matching target subscribes to %s'
                       % ', '.join(wanted or ['any section']))
     data = build_sections(live)
+    # Refuse to push a payload dnsmasq would die on. The validators guard the
+    # write paths, but imported/legacy rows can predate them — and a duplicate
+    # dhcp-host MAC kills dnsmasq at its next restart, past --test. Better one
+    # loud refusal here than a store that detonates later.
+    if isinstance(data.get('dhcp'), dict):
+        seen, dupes = set(), set()
+        for l in data['dhcp'].get('static_leases') or []:
+            (dupes if l['mac'] in seen else seen).add(l['mac'])
+        if dupes:
+            return None, ('Refusing to push: %d MAC(s) carry more than one '
+                          'reservation (%s) — one MAC gets one fixed lease; '
+                          'clear the extra is_reservation flags first'
+                          % (len(dupes), ', '.join(sorted(dupes))))
     serials = _advance_serials(data)
 
     results = []

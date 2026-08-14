@@ -53,6 +53,13 @@ def api_provision():
         # A reservation is a MAC->IP binding; without the MAC there is nothing
         # to publish and the flag would sit there looking satisfied.
         return err('A DHCP reservation needs a MAC address')
+    if is_reservation:
+        other = db.query_one(
+            'SELECT address FROM ip_addresses WHERE mac=? AND is_reservation=1',
+            (mac,))
+        if other:
+            return err('%s already carries the reservation for %s — one MAC '
+                       'gets one fixed lease' % (other['address'], mac), 409)
     desc, e = clean_text(data.get('description'), 'Description')
     if e:
         return err(e)

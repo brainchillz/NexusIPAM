@@ -585,6 +585,21 @@ Push is **section-based** — a target subscribes to what it should receive:
   DNS recorded hands out its gateway — matching what a gateway-served scope
   does, instead of letting dnsmasq silently answer with itself. Disabled
   ranges render as disabled rather than vanishing: they still consume space.
+  A payload where one MAC carries two reservations is refused before it
+  leaves — dnsmasq dies on that at its next restart, past `--test`.
+- **`netboot`** (DNSMAQ-MGR targets only) — PXE, derived from a network's
+  `option:tftp-server` + `option:bootfile-name` pair and rendered as the
+  node's own netboot entries, because dnsmasq's PXE mechanism is `dhcp-boot`,
+  not options 66/67, which many PXE ROMs ignore. On a UniFi target the same
+  pair rides inside the `dhcp` section as `dhcpd_boot_*` — recorded once,
+  enforced either way.
+
+Pushing `dhcp` to a DNSMAQ-MGR node whose **DHCP master toggle is off** is
+deliberate and safe: the stores populate, the section locks, serials advance
+— and the rendered config stays empty of `dhcp-range` lines until someone
+flips the toggle *on the node*. That toggle is never part of the payload, so
+this is how you stage a cold standby or verify the mirror path without
+serving a single lease.
 
 Two kinds of target:
 
@@ -592,7 +607,9 @@ Two kinds of target:
   `POST /api/mirror/receive`. The node re-validates every record, gates the
   swap with `dnsmasq --test`, and locks each pushed section read-only in its
   UI, so there is exactly one writer. Authenticated with a per-node mirror
-  token.
+  token — which is write-only by design, so an optional **read token** (a
+  read-only API token minted on the node) additionally lets Nexus IPAM poll
+  the node's DHCP leases into the overlay and adopt its existing DHCP state.
 - **UniFi Cloud Gateway** — has no mirror endpoint, so it is reconciled
   object by object: Static DNS against the `hosts` records (A/AAAA only;
   CNAME, TXT and the rest are left alone), and for `dhcp` the `dhcpd_*`

@@ -75,22 +75,57 @@ def record_leases(source, items, prune=True):
     return len(seen), removed
 
 
-def refresh_all():
-    """Refresh the overlay from every enabled unifi-kind push target. Returns
-    one report entry per target; errors are reported, never raised — one
-    unreachable gateway must not stop the others being read."""
-    from .pushout import _targets
-    from . import unifi
+def dnsmaq_lease_items(body):
+    """DNSMAQ-MGR's /api/dhcp/leases shape -> overlay items. Static
+    (reservation-held) MACs are skipped for the same reason the UniFi reader
+    skips fixed-IP clients: that binding is a plan record, not a dynamic
+    lease, and listing it as both double-counts the address."""
     out = []
-    for target in _targets():
-        if (target.get('kind') or 'dnsmaq') != 'unifi' or not target.get('enabled', True):
+    for l in body.get('leases') or []:
+        if l.get('static') or not l.get('ip'):
             continue
+        out.append({'ip': l['ip'], 'mac': (l.get('mac') or '').lower(),
+                    'hostname': l.get('hostname') or '',
+                    'expires': int(l.get('expiry') or 0)})
+    return out
+
+
+def read_dnsmaq_leases(target):
+    """Poll a DNSMAQ-MGR node's lease file through its API, using the
+    target's READONLY read token."""
+    from .pushout import dnsmaq_get
+    return dnsmaq_lease_items(dnsmaq_get(target, '/api/dhcp/leases'))
+
+
+def read_target_leases(target):
+    """Leases from one push target, whichever kind it is. Returns None for a
+    target with no read path (a dnsmaq node without a read token) — distinct
+    from an empty lease table, which is a real observation."""
+    if (target.get('kind') or 'dnsmaq') == 'unifi':
+        from . import unifi
         peer = dict(target)
         peer['verify'] = target.get('verify') or 'insecure'
+        return unifi.read_leases(peer)
+    if target.get('read_token'):
+        return read_dnsmaq_leases(target)
+    return None
+
+
+def refresh_all():
+    """Refresh the overlay from every enabled, readable push target. Returns
+    one report entry per target; errors are reported, never raised — one
+    unreachable server must not stop the others being read."""
+    from .pushout import _targets
+    out = []
+    for target in _targets():
+        if not target.get('enabled', True):
+            continue
         try:
-            items = unifi.read_leases(peer)
+            items = read_target_leases(target)
         except Exception as e:
             out.append({'target': target['name'], 'ok': False, 'error': str(e)})
+            continue
+        if items is None:                       # nothing to read — not an error
             continue
         stored, removed = record_leases(target['name'], items)
         out.append({'target': target['name'], 'ok': True,
@@ -160,15 +195,14 @@ def target_leases(name):
     target = next((t for t in _targets() if t['name'] == name), None)
     if not target:
         return err('No such target', 404)
-    if (target.get('kind') or 'dnsmaq') != 'unifi':
-        return err('Only a UniFi gateway can be polled for leases today', 400)
-    from . import unifi
-    peer = dict(target)
-    peer['verify'] = target.get('verify') or 'insecure'
     try:
-        items = unifi.read_leases(peer)
+        items = read_target_leases(target)
     except Exception as e:
         return err('Could not read leases from %s: %s' % (name, e), 502)
+    if items is None:
+        return err('This node has no read credential — mint a READONLY API '
+                   'token there and add it to the target as its read token '
+                   '(the mirror token is write-only by design)', 400)
     stored, removed = record_leases(name, items)
     db.audit(actor(), 'leases', 'push', None,
              '%s: %d lease(s), %d expired' % (name, stored, removed))

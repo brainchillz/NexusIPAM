@@ -98,7 +98,10 @@ async function page_scan() {
 // recorded reservation is being ignored (the address answered for another MAC).
 
 function leaseOverlaySection(lv, push) {
-  const targets = ((push && push.targets) || []).filter(t => t.kind === 'unifi');
+  // Readable targets: any gateway, plus DNSMAQ-MGR nodes that carry a
+  // read token (their mirror token is write-only by design).
+  const targets = ((push && push.targets) || [])
+    .filter(t => t.kind === 'unifi' || t.has_read_token);
   const conflicts = (lv.leases || []).filter(l => l.conflict);
   const planCell = l => {
     if (l.conflict) {
@@ -130,8 +133,8 @@ function leaseOverlaySection(lv, push) {
       {label: 'Seen', sortKey: 'seen', get: l => escapeHtml(fmtAgo(l.seen))},
     ], lv.leases || [],
       targets.length
-        ? 'Empty — refresh from a gateway target to populate it'
-        : 'Empty — add a UniFi push target (Settings → Push targets), then refresh from it here',
+        ? 'Empty — refresh from a target to populate it'
+        : 'Empty — add a UniFi push target, or give a DNSMAQ-MGR target a read token (Settings → Push targets), then refresh from it here',
       {key: 'leases'})}`;
 }
 

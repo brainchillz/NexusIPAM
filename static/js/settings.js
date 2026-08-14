@@ -504,8 +504,14 @@ function pushTargetModal(name) {
       <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
         <input id="pt-token" class="form-control" spellcheck="false"
           placeholder="${cur && cur.has_token ? '(unchanged — leave empty to keep the stored token)' : 'dmm_…'}"></div>
-      <p class="help">The node must have "accept mirrored config" enabled. The pushed hosts section
+      <p class="help">The node must have "accept mirrored config" enabled. Each pushed section
         becomes read-only there; "Detach" on its Mirroring page hands control back at any time.</p>
+      <div class="form-group"><label>Read token (optional — a READ-ONLY API token minted on the node)</label>
+        <input id="pt-read" class="form-control" spellcheck="false"
+          placeholder="${cur && cur.has_read_token ? '(unchanged — leave empty to keep the stored token)' : 'dm_…'}"></div>
+      <p class="help">The mirror token is write-only by design. A read-only token additionally lets
+        this IPAM poll the node's DHCP leases into the overlay, and adopt its existing DHCP state.
+        Mint it on the node: Settings → API tokens, role read-only.</p>
     </div>
 
     <div id="pt-unifi" style="display:none">
@@ -575,8 +581,9 @@ async function pushTargetSave() {
     body.unifi_claim_client_dns = $('pt-claim').checked;
     body.unifi_dhcp_delete_extra = $('pt-dhcp-delextra').checked;
     body.unifi_manage_scope_state = $('pt-scope-state').checked;
-  } else if ($('pt-token').value.trim()) {
-    body.token = $('pt-token').value.trim();
+  } else {
+    if ($('pt-token').value.trim()) body.token = $('pt-token').value.trim();
+    if ($('pt-read').value.trim()) body.read_token = $('pt-read').value.trim();
   }
   try {
     await API.post('/api/push/targets', body);

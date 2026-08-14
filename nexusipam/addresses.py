@@ -68,6 +68,18 @@ def _v_address(data, existing):
     if mac is None:
         return None, 'Invalid MAC address (expected aa:bb:cc:dd:ee:ff)'
 
+    # One MAC gets one fixed lease. Several addresses on one NIC is normal;
+    # several RESERVATIONS on one MAC is a config no DHCP server honours —
+    # and dnsmasq refuses to start on it (which --test does not catch).
+    if data.get('is_reservation') and mac:
+        other = db.query_one(
+            'SELECT address FROM ip_addresses WHERE mac=? AND is_reservation=1 '
+            'AND id<>?', (mac, existing['id'] if existing else -1))
+        if other:
+            return None, ('%s already carries the reservation for %s — one MAC '
+                          'gets one fixed lease; move the flag rather than '
+                          'duplicating it' % (other['address'], mac))
+
     dns_name = str(data.get('dns_name') or '').strip()
     if dns_name and not valid_fqdn(dns_name):
         return None, 'Invalid DNS name'
