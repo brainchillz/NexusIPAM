@@ -238,6 +238,14 @@ def main():
             merged['vlan_id'] = body.get('vlan_id') or prior.get('vlan_id')
             merged['source'] = prior.get('source', 'manual')
             merged['ext_id'] = prior.get('ext_id', '')
+            # These are the address plan's own L3 policy, and IPAM now AUTHORS
+            # them for DHCP — the gateway is no longer the only writer. Filling
+            # blanks is welcome; replacing a set value is not. Without this the
+            # nightly run quietly reverts every DNS or domain decision made in
+            # IPAM, which is the sort of thing that gets blamed on DHCP.
+            for field in ('gateway', 'dns_servers', 'domain', 'description'):
+                if (prior.get(field) or '').strip():
+                    merged[field] = prior[field]
             meta = prior.get('meta') or {}
             meta.update(body['meta'])
             merged['meta'] = meta
