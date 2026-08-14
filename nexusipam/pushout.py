@@ -454,7 +454,8 @@ def push_target_save():
         # gateway's whole A/AAAA table; claim_client_dns unticks a client's own
         # Local DNS Record so a static entry for that name is accepted. Neither
         # should happen because someone added a target and pressed save.
-        for flag in ('unifi_delete_extra', 'unifi_claim_client_dns'):
+        for flag in ('unifi_delete_extra', 'unifi_claim_client_dns',
+                     'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'):
             if flag in data or not cur:
                 t[flag] = bool(data.get(flag))
     else:
@@ -462,7 +463,8 @@ def push_target_save():
         # admin password sitting in the store for a target that can no longer
         # use it.
         for k in ('unifi_username', 'unifi_password', 'unifi_site',
-                  'unifi_delete_extra', 'unifi_claim_client_dns'):
+                  'unifi_delete_extra', 'unifi_claim_client_dns',
+                  'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'):
             t.pop(k, None)
         if data.get('token'):                   # omitted = keep stored token
             t['token'] = str(data['token']).strip()

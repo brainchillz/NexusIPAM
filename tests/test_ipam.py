@@ -1576,6 +1576,50 @@ def test_unifi_dhcp_flags_a_scope_with_no_matching_gateway_network():
     assert p['unmatched'] == ['10.44.0.0/24'] and not p['scopes']
 
 
+def test_unifi_dhcp_skips_networks_that_do_not_serve_dhcp():
+    """A VPN pool is in the plan because the space is consumed, not because a
+    DHCP server runs there — writing dhcpd_* onto it configures nothing."""
+    from nexusipam import unifi
+    vpn = {'_id': 'n2', 'name': 'VPN', 'ip_subnet': '10.44.0.1/24',
+           'purpose': 'remote-user-vpn'}
+    d = unifi.desired_dhcp(_payload(ranges=[
+        {'start': '10.44.0.10', 'end': '10.44.0.20', 'netmask': '255.255.255.0',
+         'lease': '12h', 'tag': 'vpn', 'enabled': True}]))
+    p = unifi.plan_dhcp(d, {'10.44.0.0/24': vpn}, {}, [])
+    assert p['skipped'] == [('10.44.0.0/24', 'remote-user-vpn')]
+    assert not p['scopes'] and not p['unmatched']
+
+
+def test_dns_authority_does_not_confer_reservation_authority(client):
+    """unifi_delete_extra exists to make this IPAM authoritative over Static
+    DNS. If it also governed reservations, turning on "publish my names" would
+    unbind every machine the plan does not list."""
+    from nexusipam import unifi
+    called = {}
+
+    def fake_plan(desired, networks, fixed, leases, mirror=False, manage_state=False):
+        called['mirror'] = mirror
+        return {'scopes': [], 'fixed_set': [], 'fixed_clear': [], 'unmatched': [],
+                'skipped': [], 'unsupported': [], 'unchanged': 0}
+
+    class FakeClient:
+        def list_networks(self):
+            return {}
+        def list_fixed(self):
+            return {}
+
+    real = unifi.plan_dhcp
+    unifi.plan_dhcp = fake_plan
+    try:
+        unifi.sync_dhcp({'unifi_delete_extra': True}, _payload(), client=FakeClient())
+        assert called['mirror'] is False        # DNS authority does not leak
+        unifi.sync_dhcp({'unifi_dhcp_delete_extra': True}, _payload(),
+                        client=FakeClient())
+        assert called['mirror'] is True         # its own flag does
+    finally:
+        unifi.plan_dhcp = real
+
+
 def test_unifi_reservations_are_set_updated_and_withdrawn():
     from nexusipam import unifi
     d = unifi.desired_dhcp(_payload())

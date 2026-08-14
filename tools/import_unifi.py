@@ -204,7 +204,12 @@ def main():
         # UniFi states the subnet as the router's own address (10.0.0.1/24),
         # so the host part is the gateway.
         gateway = str(ipaddress.ip_interface(subnet).ip)
-        dns = [c.get('dhcpd_dns_%d' % i) for i in (1, 2, 3, 4)]
+        # Only what the gateway is actually handing out. UniFi keeps the old
+        # value in dhcpd_dns_* after the option is switched off, and importing
+        # a disabled field records a DNS server no client has ever been given
+        # — which then reads as the plan's intent and gets pushed back as one.
+        dns = ([c.get('dhcpd_dns_%d' % i) for i in (1, 2, 3, 4)]
+               if c.get('dhcpd_dns_enabled') else [])
         body = {
             'cidr': str(net), 'name': c.get('name', ''), 'role': 'subnet',
             'gateway': gateway, 'dns_servers': ', '.join(d for d in dns if d),

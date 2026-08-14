@@ -646,15 +646,28 @@ def _scope_changes(scope, raw, manage_state):
     return {k: v for k, v in want.items() if raw.get(k) != v}
 
 
+# Network purposes that actually serve DHCP to clients on a segment. A
+# remote-user-vpn pool hands out addresses through the VPN server, not DHCP,
+# and a wan interface has no scope at all — writing dhcpd_* onto either is
+# configuring a service that is not running there.
+DHCP_PURPOSES = {'corporate', 'guest', 'vlan-only', 'wan-lte-failover', ''}
+
+
 def plan_dhcp(desired, networks, fixed, leases, mirror=False, manage_state=False):
     """Pure diff. `networks` is {subnet: raw}, `fixed` {mac: {...}}, `leases`
     the desired reservations. Returns the same plan vocabulary as plan()."""
     p = {'scopes': [], 'fixed_set': [], 'fixed_clear': [], 'unmatched': [],
-         'unsupported': [], 'unchanged': 0}
+         'skipped': [], 'unsupported': [], 'unchanged': 0}
     for key, scope in sorted(desired.items()):
         entry = networks.get(key)
         if entry is None:
             p['unmatched'].append(key)      # no such network on the gateway
+            continue
+        purpose = entry.get('purpose') or ''
+        if purpose not in DHCP_PURPOSES:
+            # Recorded in the plan because the space is consumed, but not a
+            # DHCP scope — leave the gateway's object alone.
+            p['skipped'].append((key, purpose))
             continue
         changes = _scope_changes(scope, entry, manage_state)
         if changes:
@@ -682,7 +695,12 @@ def plan_dhcp(desired, networks, fixed, leases, mirror=False, manage_state=False
 def sync_dhcp(peer, payload, client=None):
     """Reconcile a gateway's DHCP scopes and reservations with the plan."""
     desired = desired_dhcp(payload or {})
-    mirror = bool(peer.get('unifi_delete_extra', False))
+    # Deliberately NOT unifi_delete_extra. That flag was created to make this
+    # IPAM authoritative over Static DNS; reusing it here would mean enabling
+    # DNS authority silently withdrew every DHCP reservation the plan does not
+    # list — on a real gateway that is the difference between "publish my
+    # names" and "unbind two dozen machines from their addresses".
+    mirror = bool(peer.get('unifi_dhcp_delete_extra', False))
     manage_state = bool(peer.get('unifi_manage_scope_state', False))
     if not desired and mirror:
         raise UniFiError('no DHCP scopes to push; refusing to strip the gateway')
