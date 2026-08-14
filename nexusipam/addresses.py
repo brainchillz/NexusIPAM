@@ -108,7 +108,10 @@ def _v_address(data, existing):
 ADDRESS_LIST_SQL = """
 SELECT ip_addresses.*, networks.cidr AS network_cidr, networks.name AS network_name,
        vlans.vid AS vlan_vid,
-       scan_results.alive AS last_alive, scan_results.last_scan AS last_scan
+       scan_results.alive AS last_alive, scan_results.last_scan AS last_scan,
+       (SELECT COUNT(*) FROM ip_names
+        WHERE ip_names.address_id = ip_addresses.id AND ip_names.enabled = 1)
+         AS name_count
 FROM ip_addresses
 LEFT JOIN networks ON networks.id = ip_addresses.network_id
 LEFT JOIN vlans ON vlans.id = networks.vlan_id
@@ -263,9 +266,16 @@ def addresses_search():
         if not RE_TEXT.match(q) or len(q) > 128:
             return err('Invalid search term')
         like = '%' + q + '%'
+        # ip_names too, or an alias is unfindable: dns_name caches only the
+        # canonical (position-0) name, while the DNS servers answer for every
+        # name on the record — a search that misses aliases contradicts what
+        # the network visibly resolves.
         where.append('(ip_addresses.address LIKE ? OR ip_addresses.dns_name LIKE ? '
-                     'OR ip_addresses.description LIKE ? OR ip_addresses.mac LIKE ?)')
-        args += [like, like, like, like]
+                     'OR ip_addresses.description LIKE ? OR ip_addresses.mac LIKE ? '
+                     'OR EXISTS (SELECT 1 FROM ip_names '
+                     'WHERE ip_names.address_id = ip_addresses.id '
+                     'AND ip_names.name LIKE ?))')
+        args += [like, like, like, like, like]
 
     for col, arg in (('network_id', 'network_id'), ('assigned_id', 'assigned_id')):
         v = num(request.args.get(arg))

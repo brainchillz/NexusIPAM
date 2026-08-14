@@ -1960,6 +1960,28 @@ def _fake_gateway_names(client, monkeypatch, reservations):
                                                    'reservations': reservations})
 
 
+def test_search_finds_aliases_not_just_the_canonical_name(client):
+    """dns_name caches only position 0, but the DNS servers answer for every
+    name on the record — a search that misses aliases contradicts what the
+    network visibly resolves (found live: vmdeploy was unfindable)."""
+    mknet(client, '10.81.0.0/24')
+    _mk_addr(client, '10.81.0.5', dns_name='docker.lab.test')
+    rec = client.get('/api/addresses/search?q=docker.lab.test').json['addresses'][0]
+    client.post('/api/addresses/%d/names' % rec['id'],
+                json={'names': ['docker.lab.test', 'home.lab.test',
+                                'vmdeploy.lab.test']})
+
+    r = client.get('/api/addresses/search?q=vmdeploy').json
+    assert r['count'] == 1 and r['addresses'][0]['address'] == '10.81.0.5'
+    # The list shows how many names the address publishes.
+    assert r['addresses'][0]['name_count'] == 3
+    # The global search box finds it too.
+    g = client.get('/api/search?q=vmdeploy').json
+    assert [a['address'] for a in g['addresses']] == ['10.81.0.5']
+    # And the canonical column is untouched — position 0 still wins.
+    assert r['addresses'][0]['dns_name'] == 'docker.lab.test'
+
+
 def test_name_candidates_carry_source_and_trust(client, monkeypatch):
     """Three name sources per reservation, three trust levels; names the plan
     already publishes are not candidates; lease hostnames appear flagged

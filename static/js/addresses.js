@@ -28,7 +28,9 @@ function addressColumns(opts) {
     {label: 'Address', sortKey: 'addr_hex', get: a => `<a class="cidr" onclick="addressPeek('${jsArg(a.address)}')">${escapeHtml(a.address)}</a>`},
     {label: 'Status', sortKey: 'status', get: a =>
       statusBadge(a.status) + (a.is_reservation ? ' ' + typeBadge('reservation') : '')},
-    {label: 'DNS name', sortKey: 'dns_name', get: a => escapeHtml(a.dns_name || '') || '<span class="muted">—</span>'},
+    {label: 'DNS name', sortKey: 'dns_name', get: a =>
+      (escapeHtml(a.dns_name || '') || '<span class="muted">—</span>')
+      + (a.name_count > 1 ? ` <span class="muted" title="This address publishes ${a.name_count} names — open it to see them all">+${a.name_count - 1} more</span>` : '')},
     {label: 'Assigned to', sortKey: 'assigned_name', get: a => a.assigned_kind
       ? objLink(a.assigned_kind, a.assigned_id, a.assigned_name) + ' ' + typeBadge(a.assigned_kind)
       : '<span class="muted">—</span>'},

@@ -215,7 +215,11 @@ async function addressPeek(address) {
     ['State', r.state],
     ['Network', r.network ? r.network.cidr : '—'],
     ['VLAN', r.network && r.network.vlan_vid ? r.network.vlan_vid : '—'],
-    ['DNS name', rec ? (rec.dns_name || '—') : '—'],
+    // Every published name, canonical first — dns_name alone hides aliases,
+    // and the DNS servers answer for all of them.
+    ['DNS names', rec && (rec.names || []).length
+      ? rec.names.map(n => (n.enabled ? '' : '(disabled) ') + n.name).join(', ')
+      : (rec ? (rec.dns_name || '—') : '—')],
     ['Assigned to', rec && rec.assigned_name ? `${rec.assigned_name} (${rec.assigned_kind})` : '—'],
     ['MAC', rec ? (rec.mac || '—') : '—'],
     ['DHCP reservation', rec ? (rec.is_reservation ? 'yes — published in the dhcp section' : 'no') : '—'],

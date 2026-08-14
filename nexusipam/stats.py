@@ -128,7 +128,10 @@ def search():
     out['addresses'] = db.rows(
         'SELECT id, address, dns_name, status, description FROM ip_addresses '
         'WHERE address LIKE ? OR dns_name LIKE ? OR mac LIKE ? OR description LIKE ? '
-        'ORDER BY addr_hex LIMIT 25', (like, like, like, like))
+        'OR EXISTS (SELECT 1 FROM ip_names '
+        '           WHERE ip_names.address_id = ip_addresses.id '
+        '           AND ip_names.name LIKE ?) '
+        'ORDER BY addr_hex LIMIT 25', (like, like, like, like, like))
 
     for kind, table in (('device', 'devices'), ('vm', 'vms'),
                         ('container', 'containers'), ('cluster', 'clusters')):
