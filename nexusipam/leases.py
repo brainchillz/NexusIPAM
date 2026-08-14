@@ -102,11 +102,12 @@ def read_target_leases(target):
     target with no read path (a dnsmaq node without a read token) — distinct
     from an empty lease table, which is a real observation."""
     kind = target.get('kind') or 'dnsmaq'
-    if kind in ('unifi', 'pihole'):
-        from . import pihole, unifi
+    if kind in ('unifi', 'pihole', 'technitium'):
+        from . import pihole, technitium, unifi
         peer = dict(target)
         peer['verify'] = target.get('verify') or 'insecure'
-        adapter = unifi if kind == 'unifi' else pihole
+        adapter = {'unifi': unifi, 'pihole': pihole,
+                   'technitium': technitium}[kind]
         return adapter.read_leases(peer)
     if target.get('read_token'):
         return read_dnsmaq_leases(target)

@@ -27,15 +27,31 @@ every reconciling kind identically.
 import ipaddress
 
 from .unifi import (HttpsSession, desired_dhcp, in_subnet, records_from_hosts,
-                    split_url, status_line)
+                    split_url)
 
 __all__ = ['PiholeClient', 'PiholeError', 'plan_hosts', 'plan_dhcp',
            'sync_hosts', 'sync_dhcp', 'read_leases', 'syncer_for',
-            'status_line', 'HttpsSession']
+           'status_line', 'HttpsSession']
 
 
 class PiholeError(Exception):
     pass
+
+
+def status_line(summary):
+    """Neutral phrasing (unlike the UniFi adapter's, whose conflicts really
+    are another DNS store holding a name) — here a conflict is a modelling
+    gap: an option this server cannot express."""
+    if summary['failed']:
+        detail = summary['errors'][0] if summary['errors'] else ''
+        return 'error: %d write(s) failed%s' % (summary['failed'],
+                                                ' (%s)' % detail if detail else '')
+    if summary['conflicts']:
+        name, ours, theirs = summary['conflicts'][0]
+        extra = ' +%d more' % (len(summary['conflicts']) - 1) \
+            if len(summary['conflicts']) > 1 else ''
+        return 'conflict: %s (%s; %s)%s' % (name, ours, theirs, extra)
+    return 'ok'
 
 
 class PiholeClient:

@@ -626,6 +626,19 @@ Two kinds of target:
   express (DNS handed out, NTP, PXE, …) are reported as conflicts rather
   than silently dropped, and its DHCP server's on/off state is never touched
   without the explicit opt-in. Authenticated with the web/app password.
+- **Technitium DNS Server** — the richest mapping: the plan lands as real
+  authoritative zone records, not hosts-file lines. The target carries an
+  explicit **managed-zone list** (created as Primary if missing); every
+  record this IPAM writes is **tagged by comment**, reconcile touches only
+  tagged records, foreign records are kept unless *delete extra*, and NS/SOA
+  are never touched under any flag. Optional **reverse zones**: one PTR per
+  IPv4 address from its canonical name, in per-/24 `in-addr.arpa` zones —
+  something a hosts-file server cannot express. `dhcp` maps in full: one
+  scope per plan range (named by tag), router, DNS, domain, NTP and PXE all
+  native, reservations per scope; authored scopes start disabled, are
+  enabled only under the opt-in flag, and set `dnsUpdates: false` — in an
+  IPAM-managed zone the server auto-registering lease names would be a
+  second writer. Authenticated with a permanent API token.
 
 Every target is pushed **independently**, carrying one content-versioned
 serial per section — no target's freshness depends on another being

@@ -16,7 +16,7 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 STATIC_DIR = os.path.join(APP_DIR, 'static')
 TEMPLATES_DIR = os.path.join(APP_DIR, 'templates')
 
-APP_VERSION = '0.3.0'
+APP_VERSION = '0.4.0'
 
 DATA_DIR = os.environ.get('NEXUSIPAM_DATA_DIR', APP_DIR)
 DB_PATH = os.environ.get('NEXUSIPAM_DB', os.path.join(DATA_DIR, 'ipam.db'))

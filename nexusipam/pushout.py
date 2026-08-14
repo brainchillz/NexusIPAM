@@ -31,7 +31,7 @@ from . import netutil
 from .core import db
 from .core.auth import actor
 from .core.runcmd import err
-from .core.validators import RE_SLUG, clean_text
+from .core.validators import RE_SLUG, clean_text, valid_fqdn
 
 bp = Blueprint('pushout', __name__)
 
@@ -50,14 +50,18 @@ PUSH_TIMEOUT = 30
 #     nothing to lock, so the gateway's UI stays editable and drift is possible.
 #   'pihole' — a Pi-hole (v6 API): dns.hosts and the dhcp.* config reconciled
 #     by the pihole adapter. Same reconcile model as 'unifi'.
+#   'technitium' — a Technitium DNS Server: real authoritative zones (ours
+#     tagged by record comment) and full multi-scope DHCP, reconciled by the
+#     technitium adapter.
 # Reaching every target directly is the standing rule: no target's freshness
 # depends on another being up.
-KINDS = ('dnsmaq', 'unifi', 'pihole')
+KINDS = ('dnsmaq', 'unifi', 'pihole', 'technitium')
 
-# Reconciling kinds (no mirror endpoint) -> adapter module. Both adapters
+# Reconciling kinds (no mirror endpoint) -> adapter module. The adapters
 # share the summary schema, status_line, and the syncer registry contract, so
 # the push path treats them identically.
-ADAPTER_KINDS = {'unifi': 'unifi', 'pihole': 'pihole'}
+ADAPTER_KINDS = {'unifi': 'unifi', 'pihole': 'pihole',
+                 'technitium': 'technitium'}
 
 # The credential/flag fields each kind owns. Switching a target's kind must
 # not leave another kind's secrets sitting in the store for a target that can
@@ -69,6 +73,9 @@ KIND_FIELDS = {
               'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'),
     'pihole': ('pihole_password', 'pihole_delete_extra',
                'pihole_dhcp_delete_extra', 'pihole_manage_scope_state'),
+    'technitium': ('technitium_token', 'technitium_zones',
+                   'technitium_delete_extra', 'technitium_dhcp_delete_extra',
+                   'technitium_manage_scope_state', 'technitium_manage_reverse'),
 }
 
 # Which sections each kind can carry. A UniFi gateway serves both DNS and
@@ -83,6 +90,10 @@ KIND_SECTIONS = {
     'dnsmaq': ('hosts', 'dhcp', 'netboot'),
     'unifi': ('hosts', 'dhcp'),
     'pihole': ('hosts', 'dhcp'),
+    # PXE reaches a Technitium scope through the same dhcp payload options
+    # (serverAddress + bootFileName), so no separate netboot section here
+    # either.
+    'technitium': ('hosts', 'dhcp'),
 }
 
 # DNSMAQ-MGR record ids (h_xxxxxx) — only ids of this shape survive its
@@ -367,7 +378,8 @@ def _public(t):
     out = dict(t)
     out.setdefault('kind', 'dnsmaq')
     out['sections'] = sections_for(t)
-    out['has_token'] = bool(out.pop('token', ''))
+    out['has_token'] = bool(out.pop('token', '')
+                            or out.pop('technitium_token', ''))
     out['has_password'] = bool(out.pop('unifi_password', '')
                                or out.pop('pihole_password', ''))
     out['has_read_token'] = bool(out.pop('read_token', ''))
@@ -600,6 +612,30 @@ def push_target_save():
                      'pihole_manage_scope_state'):
             if flag in data or not cur:
                 t[flag] = bool(data.get(flag))
+    elif kind == 'technitium':
+        if data.get('technitium_token'):        # omitted = keep stored token
+            t['technitium_token'] = str(data['technitium_token']).strip()
+        if not t.get('technitium_token'):
+            return err('A Technitium API token is required — create a '
+                       'permanent one there (Administration → Sessions → '
+                       'Create Token) rather than storing the admin password')
+        if 'technitium_zones' in data or not cur:
+            zones = [z.strip().rstrip('.').lower()
+                     for z in str(data.get('technitium_zones') or '')
+                     .replace(',', ' ').split() if z.strip()]
+            bad = [z for z in zones if not valid_fqdn(z)]
+            if bad:
+                return err('Invalid zone name(s): %s' % ', '.join(bad))
+            if not zones:
+                return err('At least one managed zone is required (e.g. '
+                           'example.net) — the zone list is what bounds which '
+                           'records this IPAM authors there')
+            t['technitium_zones'] = ', '.join(zones)
+        for flag in ('technitium_delete_extra', 'technitium_dhcp_delete_extra',
+                     'technitium_manage_scope_state',
+                     'technitium_manage_reverse'):
+            if flag in data or not cur:
+                t[flag] = bool(data.get(flag))
     else:
         if data.get('token'):                   # omitted = keep stored token
             t['token'] = str(data['token']).strip()
@@ -685,7 +721,69 @@ def run_drift(target, client=None):
     unreachable/refusing server; the route wraps that."""
     if target.get('kind') == 'pihole':
         return _drift_pihole(target, client)
+    if target.get('kind') == 'technitium':
+        return _drift_technitium(target, client)
     return _drift_unifi(target, client)
+
+
+def _drift_technitium(target, client=None):
+    from . import technitium
+    peer = dict(target)
+    peer['verify'] = target.get('verify') or 'insecure'
+    data = build_sections(sections_for(target))
+    report = {'ts': db.now(), 'ok': True, 'sections': {}}
+    own = client is None
+    if own:
+        client = technitium._connect(peer)
+    try:
+        if 'hosts' in data:
+            mirror = bool(peer.get('technitium_delete_extra'))
+            zones = technitium.managed_zones(peer)
+            have = set(client.zones())
+            existing = {z: client.zone_records(z) for z in zones if z in have}
+            p = technitium.plan_hosts(
+                technitium.records_from_hosts(data['hosts']), zones, existing,
+                mirror=mirror)
+            counts = {'missing': p['created'], 'extra': p['deleted'],
+                      'missing_zones': sum(1 for z in zones if z not in have)}
+            in_step = p['unchanged']
+            examples = (['missing %s' % k[1] for k in p['add'][:4]]
+                        + ['extra %s' % k[1] for k in p['delete'][:2]])
+            if peer.get('technitium_manage_reverse'):
+                wanted_rev = technitium.plan_reverse(data['hosts'], {})['zones']
+                rev_existing = {z: client.zone_records(z)
+                                for z in wanted_rev if z in have}
+                rp = technitium.plan_reverse(data['hosts'], rev_existing,
+                                             mirror=mirror)
+                counts['ptr_missing'] = rp['created']
+                counts['ptr_extra'] = rp['deleted']
+                counts['missing_zones'] += sum(1 for z in wanted_rev
+                                               if z not in have)
+                in_step += rp['unchanged']
+            report['sections']['hosts'] = {'drifted': any(counts.values()),
+                                           'in_step': in_step,
+                                           'counts': counts,
+                                           'examples': examples}
+        if 'dhcp' in data:
+            p = technitium.plan_dhcp(
+                data['dhcp'], client.scopes(), client.scope,
+                mirror=bool(peer.get('technitium_dhcp_delete_extra')),
+                manage_state=bool(peer.get('technitium_manage_scope_state')))
+            counts = {'scopes_missing': p['created'],
+                      'scopes_differ': p['updated'],
+                      'scopes_extra': p['deleted'],
+                      'state_changes': len(p['enable']) + len(p['disable']),
+                      'unsupported': len(p['conflicts'])}
+            actionable = {k: v for k, v in counts.items() if k != 'unsupported'}
+            report['sections']['dhcp'] = {
+                'drifted': any(actionable.values()),
+                'in_step': p['unchanged'], 'counts': counts,
+                'examples': ['scope %s differs' % f['name']
+                             for f, _new in p['set']][:6]}
+        return report
+    finally:
+        if own:
+            client.close()
 
 
 def _drift_pihole(target, client=None):

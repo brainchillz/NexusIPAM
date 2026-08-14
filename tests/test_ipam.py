@@ -2296,6 +2296,197 @@ def test_netboot_section_renders_from_the_pxe_options(client):
     assert r.status_code == 400 and 'cannot carry' in r.json['error']
 
 
+# ─── Technitium adapter ───────────────────────────────────────────────
+
+def test_technitium_plan_hosts_owns_only_tagged_records():
+    """Ownership is exact: reconcile touches only comment-tagged records.
+    A foreign record already stating the desired mapping is covered, other
+    foreign records are kept unless mirroring, and names outside every
+    managed zone are skipped, never guessed into one."""
+    from nexusipam import technitium
+    desired = [('web.example.net', 'A', '10.0.0.5'),
+               ('sub.deep.example.net', 'A', '10.0.0.6'),
+               ('other.lan', 'A', '10.0.0.7')]          # outside managed zones
+    existing = {'example.net': [
+        {'name': 'stale.example.net', 'type': 'A',
+         'rData': {'ipAddress': '10.0.0.9'}, 'comments': 'nexus-ipam'},
+        {'name': 'web.example.net', 'type': 'A',
+         'rData': {'ipAddress': '10.0.0.5'}, 'comments': ''},   # foreign, exact
+        {'name': 'hand.example.net', 'type': 'A',
+         'rData': {'ipAddress': '10.0.0.8'}, 'comments': ''},   # foreign
+        {'name': 'example.net', 'type': 'SOA', 'rData': {}, 'comments': ''},
+    ]}
+    p = technitium.plan_hosts(desired, ['example.net'], existing)
+    assert p['skipped'] == 1
+    assert p['covered'] == 1                    # web served untagged — no write
+    assert [(z, n) for z, n, _t, _v in p['add']] == \
+        [('example.net', 'sub.deep.example.net')]
+    assert [(z, n) for z, n, _t, _v in p['delete']] == \
+        [('example.net', 'stale.example.net')]  # ours, no longer desired
+    assert p['kept'] == 1                       # hand.example.net stays
+
+    p = technitium.plan_hosts(desired, ['example.net'], existing, mirror=True)
+    deleted = {n for _z, n, _t, _v in p['delete']}
+    # Mirroring removes STALE foreign A records — but a foreign record that
+    # states a desired mapping stays (it already serves the right answer, and
+    # if the plan ever drops the name, mirror mode removes it then). The SOA
+    # is never a candidate.
+    assert deleted == {'stale.example.net', 'hand.example.net'}
+
+
+def test_technitium_plan_reverse_uses_the_canonical_name():
+    """One PTR per address, from the FIRST enabled A in payload order — the
+    position-0 ordering finally expressed as an explicit record."""
+    from nexusipam import technitium
+    hosts = [{'name': 'docker.example.net', 'a': '10.0.5.10', 'enabled': True},
+             {'name': 'alias.example.net', 'a': '10.0.5.10', 'enabled': True},
+             {'name': 'off.example.net', 'a': '10.0.6.1', 'enabled': False}]
+    p = technitium.plan_reverse(hosts, {})
+    assert p['zones'] == ['5.0.10.in-addr.arpa']
+    assert p['add'] == [('5.0.10.in-addr.arpa', '10.5.0.10.in-addr.arpa',
+                         'docker.example.net')]
+
+
+def test_technitium_scope_fields_map_the_full_option_set():
+    """Everything the payload states lands natively — the contrast with the
+    single-scope, router-only Pi-hole. Formats are the probed ones: lease
+    split into d/h/m, dash-MAC pipe-group reservations, dnsUpdates forced
+    off (an IPAM-managed zone tolerates no second writer)."""
+    from nexusipam import technitium
+    payload = {
+        'ranges': [{'start': '10.0.0.100', 'end': '10.0.0.200',
+                    'netmask': '255.255.254.0', 'lease': '26h', 'tag': 'lan',
+                    'enabled': True}],
+        'options': [{'tag': 'lan', 'option': 'option:router', 'value': '10.0.0.1'},
+                    {'tag': 'lan', 'option': 'option:dns-server', 'value': '10.0.0.53,10.0.0.54'},
+                    {'tag': 'lan', 'option': 'option:domain-name', 'value': 'example.net'},
+                    {'tag': 'lan', 'option': 'option:ntp-server', 'value': '10.0.0.5'},
+                    {'tag': 'lan', 'option': 'option:tftp-server', 'value': '10.0.0.9'},
+                    {'tag': 'lan', 'option': 'option:bootfile-name', 'value': 'netboot.xyz.kpxe'}],
+        'static_leases': [{'mac': 'aa:bb:cc:00:84:01', 'ip': '10.0.0.10',
+                           'hostname': 'nas'}],
+    }
+    scopes = technitium.scopes_from_payload(payload)
+    f = technitium.scope_fields('lan', scopes['lan'],
+                                payload['static_leases'])
+    assert (f['startingAddress'], f['endingAddress']) == ('10.0.0.100', '10.0.0.200')
+    assert f['subnetMask'] == '255.255.254.0'
+    assert (f['leaseTimeDays'], f['leaseTimeHours'], f['leaseTimeMinutes']) == (1, 2, 0)
+    assert f['routerAddress'] == '10.0.0.1'
+    assert f['dnsServers'] == '10.0.0.53,10.0.0.54' and f['useThisDnsServer'] == 'false'
+    assert f['domainName'] == 'example.net'
+    assert f['ntpServers'] == '10.0.0.5'
+    assert f['serverAddress'] == '10.0.0.9'          # PXE next-server (siaddr)
+    assert f['bootFileName'] == 'netboot.xyz.kpxe'
+    assert f['dnsUpdates'] == 'false'
+    assert f['reservedLeases'] == 'nas|AA-BB-CC-00-84-01|10.0.0.10|nexus-ipam'
+
+
+def test_technitium_plan_dhcp_scopes_by_name(client):
+    from nexusipam import technitium
+    payload = {
+        'ranges': [{'start': '10.0.0.100', 'end': '10.0.0.200',
+                    'netmask': '255.255.255.0', 'lease': '24h', 'tag': 'lan',
+                    'enabled': True}],
+        'options': [],
+        'static_leases': [{'mac': 'aa:bb:cc:00:84:02', 'ip': '10.99.9.9',
+                           'hostname': 'far'}],       # outside every scope
+    }
+    scope_list = [{'name': 'Default', 'enabled': False},
+                  {'name': 'lan', 'enabled': False}]
+    current = {'lan': {'startingAddress': '10.0.0.100',
+                       'endingAddress': '10.0.0.150',   # differs
+                       'subnetMask': '255.255.255.0', 'leaseTimeDays': 1,
+                       'leaseTimeHours': 0, 'leaseTimeMinutes': 0,
+                       'dnsUpdates': False, 'reservedLeases': []}}
+    p = technitium.plan_dhcp(payload, scope_list, lambda n: current[n])
+    assert p['updated'] == 1 and p['created'] == 0
+    assert p['kept'] == 1                        # foreign 'Default' untouched
+    assert p['skipped_reservations'] == 1
+    assert p['enable'] == []                     # manage_state off
+    p = technitium.plan_dhcp(payload, scope_list, lambda n: current[n],
+                             mirror=True, manage_state=True)
+    assert p['delete'] == ['Default'] and p['enable'] == ['lan']
+
+
+def test_technitium_target_push_drift_and_leases(client, monkeypatch):
+    from nexusipam import pushout, technitium
+    # Token and at least one managed zone are required; zones are validated.
+    assert client.post('/api/push/targets',
+                       json={'name': 'tn', 'kind': 'technitium',
+                             'url': 'https://tn:53443',
+                             'technitium_zones': 'example.net'}).status_code == 400
+    assert client.post('/api/push/targets',
+                       json={'name': 'tn', 'kind': 'technitium',
+                             'url': 'https://tn:53443',
+                             'technitium_token': 'x'}).status_code == 400
+    r = client.post('/api/push/targets',
+                    json={'name': 'tn', 'kind': 'technitium',
+                          'url': 'https://tn:53443', 'technitium_token': 'x',
+                          'technitium_zones': 'example.net, bad..zone'})
+    assert r.status_code == 400 and 'Invalid zone' in r.json['error']
+    r = client.post('/api/push/targets',
+                    json={'name': 'tn', 'kind': 'technitium',
+                          'url': 'https://tn:53443', 'technitium_token': 'secret',
+                          'technitium_zones': 'example.net',
+                          'sections': ['hosts', 'dhcp']})
+    assert r.json['target']['has_token'] is True
+    assert 'technitium_token' not in r.json['target']
+    assert client.post('/api/push/targets',
+                       json={'name': 'tn', 'kind': 'technitium',
+                             'sections': ['netboot']}).status_code == 400
+
+    mknet(client, '10.84.0.0/24', domain='example.net')
+    _mk_addr(client, '10.84.0.5', dns_name='tn-test.example.net')
+    monkeypatch.setattr(technitium, 'sync_hosts',
+                        lambda peer, hosts, client=None:
+                            {'created': 1, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                             'unchanged': 0, 'covered': 0, 'conflicts': [],
+                             'failed': 0, 'errors': []})
+    monkeypatch.setattr(technitium, 'sync_dhcp',
+                        lambda peer, payload, client=None:
+                            {'created': 0, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                             'unchanged': 1, 'covered': 0, 'conflicts': [],
+                             'failed': 0, 'errors': []})
+    out, e = pushout.run_push('tn')
+    assert e is None and out['success']
+
+    class FakeClient:
+        def zones(self):
+            return []
+
+        def zone_records(self, zone):
+            return []
+
+        def scopes(self):
+            return []
+
+        def scope(self, name):
+            raise AssertionError('no scopes exist to fetch')
+
+        def close(self):
+            pass
+
+        def dhcp_leases(self):
+            return [{'type': 'Dynamic', 'address': '10.84.0.30',
+                     'hardwareAddress': 'AA-BB-CC-00-84-30',
+                     'hostName': 'dyn.example.net.',
+                     'leaseExpires': '2026-08-15 04:00:00'},
+                    {'type': 'Reserved', 'address': '10.84.0.10',
+                     'hardwareAddress': 'AA-BB-CC-00-84-10'}]
+
+    target = next(t for t in pushout._targets() if t['name'] == 'tn')
+    report = pushout.run_drift(target, client=FakeClient())
+    assert report['sections']['hosts']['counts']['missing'] == 1
+    assert report['sections']['hosts']['counts']['missing_zones'] == 1
+    assert report['sections']['hosts']['drifted']
+
+    out = technitium.read_leases({'url': 'https://tn:53443'}, client=FakeClient())
+    assert out == [{'ip': '10.84.0.30', 'mac': 'aa:bb:cc:00:84:30',
+                    'hostname': 'dyn.example.net', 'expires': out[0]['expires']}]
+    assert out[0]['expires'] > 0
+
+
 # ─── Pi-hole adapter ──────────────────────────────────────────────────
 
 def test_pihole_plan_hosts_is_additive_and_ptr_ordered():

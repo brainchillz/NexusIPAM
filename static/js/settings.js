@@ -89,6 +89,9 @@ async function page_settings() {
         if (t.kind === 'pihole') {
           return `<span class="status-badge">Pi-hole</span><br><span class="muted">${t.pihole_delete_extra ? 'authoritative' : 'additive'}</span>`;
         }
+        if (t.kind === 'technitium') {
+          return `<span class="status-badge">Technitium</span><br><span class="muted">${escapeHtml(t.technitium_zones || '')}</span>`;
+        }
         return '<span class="status-badge">DNSMAQ-MGR</span>';
       }},
       {label: 'Sections held', get: t => sectionBadges(t, push)},
@@ -486,6 +489,7 @@ function pushTargetModal(name) {
         <option value="dnsmaq" ${kind === 'dnsmaq' ? 'selected' : ''}>DNSMAQ-MGR node (mirror push)</option>
         <option value="unifi" ${kind === 'unifi' ? 'selected' : ''}>UniFi Cloud Gateway (direct reconcile)</option>
         <option value="pihole" ${kind === 'pihole' ? 'selected' : ''}>Pi-hole (v6 API, direct reconcile)</option>
+        <option value="technitium" ${kind === 'technitium' ? 'selected' : ''}>Technitium DNS Server (zones + DHCP scopes)</option>
       </select></div>
     <div class="form-group"><label>Name</label>
       <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"
@@ -577,6 +581,33 @@ function pushTargetModal(name) {
         reservations, and the third can turn its DHCP server on or off — with the plan's
         <code>enabled</code> flag deciding which.</p>
     </div>
+    <div id="pt-technitium" style="display:none">
+      <div class="form-group"><label>API token (create a permanent one there: Administration → Sessions → Create Token)</label>
+        <input id="pt-tn-token" class="form-control" spellcheck="false"
+          placeholder="${cur && cur.has_token && kind === 'technitium' ? '(unchanged — leave empty to keep the stored token)' : ''}"></div>
+      <div class="form-group"><label>Managed zones (comma or space separated)</label>
+        <input id="pt-tn-zones" class="form-control" spellcheck="false" placeholder="example.net"
+          value="${cur ? escapeHtml(cur.technitium_zones || '') : ''}">
+        <p class="help">The zones this IPAM authors — created as Primary if missing. Records this
+          IPAM writes are tagged by comment, and reconcile only ever touches tagged records;
+          names outside every managed zone are counted as skipped. NS/SOA are never touched.</p></div>
+      <label class="checkitem" style="padding-left:0"><input id="pt-tn-reverse" type="checkbox"
+        ${cur && cur.technitium_manage_reverse ? 'checked' : ''}>
+        Manage reverse (PTR) zones — one PTR per address, from its canonical name</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-tn-delextra" type="checkbox"
+        ${cur && cur.technitium_delete_extra ? 'checked' : ''}>
+        Delete untagged A/AAAA (and PTR) records in the managed zones</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-tn-dhcp-delextra" type="checkbox"
+        ${cur && cur.technitium_dhcp_delete_extra ? 'checked' : ''}>
+        Delete DHCP scopes the plan does not define</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-tn-scope-state" type="checkbox"
+        ${cur && cur.technitium_manage_scope_state ? 'checked' : ''}>
+        Manage scope enable/disable state</label>
+      <p class="help">Scopes this IPAM creates start <strong>disabled</strong> and are named after
+        the plan's scope tags; scopes with other names are foreign and kept unless the delete flag
+        says otherwise. Authored scopes set <code>dnsUpdates: false</code> — in an IPAM-managed
+        zone, the server auto-registering lease names would be a second writer.</p>
+    </div>
     <button class="btn" onclick="pushTargetSave()">${cur ? 'Save' : 'Add target'}</button>`);
   pushTargetKind();
 }
@@ -585,9 +616,11 @@ function pushTargetKind() {
   const kind = $('pt-kind').value;
   $('pt-unifi').style.display = kind === 'unifi' ? '' : 'none';
   $('pt-pihole').style.display = kind === 'pihole' ? '' : 'none';
+  $('pt-technitium').style.display = kind === 'technitium' ? '' : 'none';
   $('pt-dnsmaq').style.display = kind === 'dnsmaq' ? '' : 'none';
   $('pt-url').placeholder = {unifi: 'https://192.168.1.1',
-                             pihole: 'https://pihole-host:443'}[kind] || 'https://dns-node:8443';
+                             pihole: 'https://pihole-host:443',
+                             technitium: 'https://technitium-host:53443'}[kind] || 'https://dns-node:8443';
 }
 
 async function pushTargetSave() {
@@ -614,6 +647,13 @@ async function pushTargetSave() {
     body.pihole_delete_extra = $('pt-ph-delextra').checked;
     body.pihole_dhcp_delete_extra = $('pt-ph-dhcp-delextra').checked;
     body.pihole_manage_scope_state = $('pt-ph-scope-state').checked;
+  } else if (kind === 'technitium') {
+    if ($('pt-tn-token').value.trim()) body.technitium_token = $('pt-tn-token').value.trim();
+    body.technitium_zones = $('pt-tn-zones').value.trim();
+    body.technitium_manage_reverse = $('pt-tn-reverse').checked;
+    body.technitium_delete_extra = $('pt-tn-delextra').checked;
+    body.technitium_dhcp_delete_extra = $('pt-tn-dhcp-delextra').checked;
+    body.technitium_manage_scope_state = $('pt-tn-scope-state').checked;
   } else {
     if ($('pt-token').value.trim()) body.token = $('pt-token').value.trim();
     if ($('pt-read').value.trim()) body.read_token = $('pt-read').value.trim();
