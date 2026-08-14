@@ -385,7 +385,19 @@ def push_status():
 
 @bp.route('/api/push/preview')
 def push_preview():
-    return jsonify({'hosts': build_hosts()})
+    """Exactly what would be sent, without sending it. Every renderable
+    section by default, or `?sections=dhcp`.
+
+    This is the only way to inspect a payload before it reaches a live server,
+    so it renders the same builders the push does rather than approximating
+    them — a preview that is not byte-identical to the push is worse than none.
+    """
+    raw = (request.args.get('sections') or '').strip()
+    names = [s for s in raw.replace(',', ' ').split() if s] or list(sections_available())
+    bad = [s for s in names if s not in SECTION_BUILDERS]
+    if bad:
+        return err('Unknown section(s): %s' % ', '.join(bad))
+    return jsonify(build_sections(names))
 
 
 @bp.route('/api/push/targets', methods=['POST'])
