@@ -312,6 +312,13 @@ class UniFiClient:
                              % (entry.get('name') or entry['_id'], status,
                                 str(data)[:120]))
 
+    def list_active(self):
+        """Clients the gateway currently sees, with their addresses."""
+        status, data = self._req('GET', '/proxy/network/api/s/%s/stat/sta' % self.site)
+        if status >= 400:
+            raise UniFiError('listing active clients failed: HTTP %s' % status)
+        return [c for c in ((data or {}).get('data') or []) if isinstance(c, dict)]
+
     def list_fixed(self):
         """{mac: {'id', 'ip', 'network_id', 'name'}} for fixed-IP clients."""
         status, data = self._req('GET', '/proxy/network/api/s/%s/rest/user' % self.site)
@@ -732,6 +739,33 @@ def _opts_from_network(n):
     if n.get('dhcpd_wpad_url'):
         out['option:wpad-url'] = n['dhcpd_wpad_url']
     return out
+
+
+def read_leases(peer, client=None):
+    """Currently-leased addresses, as the gateway sees them right now.
+
+    Observed, never authored: the caller stores this as a disposable overlay.
+    Clients with a fixed IP are skipped — that binding is a plan record, not a
+    dynamic lease, and listing it as both double-counts the address.
+    """
+    own = client is None
+    if own:
+        session = HttpsSession(peer['url'], peer.get('verify', 'system'))
+        client = UniFiClient(session, peer.get('unifi_site') or 'default')
+        client.login(peer.get('unifi_username') or '', peer.get('unifi_password') or '')
+    try:
+        out = []
+        for c in client.list_active():
+            ip = (c.get('ip') or '').strip()
+            if not ip or c.get('use_fixedip'):
+                continue
+            out.append({'ip': ip, 'mac': (c.get('mac') or '').lower(),
+                        'hostname': (c.get('hostname') or c.get('name') or '').strip(),
+                        'expires': int(c.get('dhcpend_time') or 0)})
+        return out
+    finally:
+        if own:
+            client.logout()
 
 
 def read_state(peer, client=None):

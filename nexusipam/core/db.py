@@ -38,7 +38,7 @@ _local = threading.local()
 # sequences from interleaving.
 WRITE_LOCK = threading.RLock()
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Objects an IP address can be assigned to. Polymorphic by design — a SQL FK
 # cannot point at four tables — so the app layer validates the target exists
@@ -314,6 +314,24 @@ CREATE TABLE IF NOT EXISTS dns_servers (
   created     INTEGER NOT NULL DEFAULT 0,
   updated     INTEGER NOT NULL DEFAULT 0
 );
+
+-- Dynamic DHCP leases, OBSERVED not authored. A lease is only true until it
+-- expires, so recording one as a plan record writes down something that stops
+-- being true with nobody touching it — the reason this is a separate,
+-- disposable table and not rows in ip_addresses. Keyed by address, like
+-- scan_results, because the question is always "what is at this address now".
+-- Excluded from the backup set on purpose: it is re-observed, not restored.
+CREATE TABLE IF NOT EXISTS dhcp_leases (
+  address   TEXT PRIMARY KEY,
+  version   INTEGER NOT NULL,
+  addr_hex  TEXT NOT NULL,
+  mac       TEXT NOT NULL DEFAULT '',
+  hostname  TEXT NOT NULL DEFAULT '',
+  expires   INTEGER NOT NULL DEFAULT 0,
+  source    TEXT NOT NULL DEFAULT '',
+  seen      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_leases_hex ON dhcp_leases(version, addr_hex);
 
 -- ─── Scanner ────────────────────────────────────────────────────────
 -- Keyed by address text, NOT by ip_addresses.id: the whole point of a sweep

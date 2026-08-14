@@ -1359,7 +1359,7 @@ def test_v3_database_upgrades_in_place(tmp_path, monkeypatch):
     monkeypatch.setattr(dbmod._local, 'conn', None, raising=False)
     fresh = dbmod.init_db()
     assert fresh.execute("SELECT value FROM meta WHERE key='schema_version'"
-                         ).fetchone()[0] == '4'
+                         ).fetchone()[0] == str(dbmod.SCHEMA_VERSION)
     fresh.execute('SELECT * FROM dhcp_options')          # table now exists
     # The address kept its single name — the v3 migration did not run again
     # and duplicate it.
@@ -1724,6 +1724,80 @@ def test_unifi_read_state_ignores_disabled_option_fields():
     assert net['gateway'] == '10.91.0.1'
     assert net['range'] == {'start': '10.91.0.100', 'end': '10.91.0.200',
                             'lease': '24h', 'enabled': True}
+
+
+# ─── Lease overlay ────────────────────────────────────────────────────
+
+def test_leases_are_observed_never_written_into_the_plan(client):
+    from nexusipam import leases
+    from nexusipam.core import db
+    mknet(client, '10.95.0.0/24')
+    stored, _ = leases.record_leases('gw', [
+        {'ip': '10.95.0.50', 'mac': 'aa:bb:cc:00:95:01', 'hostname': 'laptop'},
+        {'ip': '10.95.0.51', 'mac': 'aa:bb:cc:00:95:02', 'hostname': 'phone'}])
+    assert stored == 2
+    # The whole point: none of this became an address record.
+    assert db.query_one('SELECT COUNT(*) c FROM ip_addresses')['c'] == 0
+    body = client.get('/api/leases').get_json()
+    assert body['count'] == 2 and body['unrecorded'] == 2
+
+
+def test_lease_refresh_drops_what_the_source_stopped_reporting(client):
+    """A lease that has gone is absent from the next poll, never announced —
+    so the overlay has to be replaced, not accumulated."""
+    from nexusipam import leases
+    leases.record_leases('gw', [{'ip': '10.96.0.10', 'mac': 'aa:bb:cc:00:96:01'},
+                                {'ip': '10.96.0.11', 'mac': 'aa:bb:cc:00:96:02'}])
+    stored, removed = leases.record_leases('gw', [{'ip': '10.96.0.10',
+                                                   'mac': 'aa:bb:cc:00:96:01'}])
+    assert (stored, removed) == (1, 1)
+    assert client.get('/api/leases').get_json()['count'] == 1
+
+
+def test_lease_refresh_leaves_other_sources_alone(client):
+    from nexusipam import leases
+    leases.record_leases('gw-a', [{'ip': '10.97.0.10', 'mac': 'aa:bb:cc:00:97:01'}])
+    leases.record_leases('gw-b', [{'ip': '10.98.0.10', 'mac': 'aa:bb:cc:00:98:01'}])
+    leases.record_leases('gw-a', [{'ip': '10.97.0.11', 'mac': 'aa:bb:cc:00:97:02'}])
+    addrs = {l['address'] for l in client.get('/api/leases').get_json()['leases']}
+    assert addrs == {'10.97.0.11', '10.98.0.10'}
+
+
+def test_lease_flags_an_address_used_by_the_wrong_machine(client):
+    """Reserved for one MAC, leased to another — the signal a ping sweep
+    cannot give you."""
+    from nexusipam import leases
+    mknet(client, '10.99.0.0/24')
+    _mk_addr(client, '10.99.0.10', mac='aa:bb:cc:00:99:01', dns_name='printer.lan')
+    leases.record_leases('gw', [{'ip': '10.99.0.10', 'mac': 'ff:ee:dd:00:00:01',
+                                 'hostname': 'someone-elses-laptop'}])
+    body = client.get('/api/leases').get_json()
+    assert body['conflicts'] == 1
+    row = body['leases'][0]
+    assert row['record_name'] == 'printer.lan' and row['conflict'] is True
+
+
+def test_unifi_read_leases_skips_fixed_ip_clients():
+    """A fixed binding is a plan record, not a dynamic lease — counting it as
+    both double-counts the address."""
+    from nexusipam import unifi
+
+    class FakeClient:
+        def list_active(self):
+            return [{'ip': '10.99.0.20', 'mac': 'AA:BB:CC:00:00:20', 'hostname': 'dyn'},
+                    {'ip': '10.99.0.21', 'mac': 'aa:bb:cc:00:00:21', 'use_fixedip': True},
+                    {'mac': 'aa:bb:cc:00:00:22'}]          # no address yet
+
+    out = unifi.read_leases({}, client=FakeClient())
+    assert out == [{'ip': '10.99.0.20', 'mac': 'aa:bb:cc:00:00:20',
+                    'hostname': 'dyn', 'expires': 0}]
+
+
+def test_leases_are_not_in_the_backup_set():
+    """Observed state is re-observed, not restored — and a stale lease table
+    restored into a live instance would describe a network that has moved on."""
+    from nexusipam.exports import DUMP_TABLES
+    assert 'dhcp_leases' not in DUMP_TABLES
 
 
 # ─── Multi-section push ───────────────────────────────────────────────

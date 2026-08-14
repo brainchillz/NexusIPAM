@@ -48,7 +48,11 @@ def clean_db():
     conn = db.connect()
     for table in reversed(DUMP_TABLES):
         conn.execute('DELETE FROM %s' % table)
+    # Observed-state tables are not in DUMP_TABLES (they are re-observed, not
+    # restored), so they have to be listed here explicitly or they leak
+    # between tests.
     conn.execute('DELETE FROM scan_results')
+    conn.execute('DELETE FROM dhcp_leases')
     conn.execute('DELETE FROM audit')
     # App settings live in `meta` too — push targets, the push serial, sync run
     # reports. Leaving them behind makes push tests order-dependent: a target
