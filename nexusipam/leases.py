@@ -11,7 +11,9 @@ in use right now, and which recorded reservations are not being taken up —
 questions a ping sweep answers slowly and imprecisely, and a lease table
 answers exactly.
 """
+import os
 import time
+import threading
 
 from flask import Blueprint, jsonify, request
 
@@ -26,6 +28,11 @@ bp = Blueprint('leases', __name__)
 # above a typical lease time so a slow refresh schedule does not blank the
 # view between polls.
 LEASE_TTL = 7 * 86400
+
+# How often the background refresher polls each gateway target. 0 disables —
+# the overlay then only moves when someone presses Refresh in the UI, which
+# quietly rots into a conflict view nobody can trust; hence a default.
+LEASE_MINUTES = float(os.environ.get('NEXUSIPAM_LEASE_MINUTES', 60))
 
 
 def record_leases(source, items, prune=True):
@@ -66,6 +73,51 @@ def record_leases(source, items, prune=True):
             removed = db.execute(sql, tuple(args)).rowcount
         db.execute('DELETE FROM dhcp_leases WHERE seen < ?', (ts - LEASE_TTL,))
     return len(seen), removed
+
+
+def refresh_all():
+    """Refresh the overlay from every enabled unifi-kind push target. Returns
+    one report entry per target; errors are reported, never raised — one
+    unreachable gateway must not stop the others being read."""
+    from .pushout import _targets
+    from . import unifi
+    out = []
+    for target in _targets():
+        if (target.get('kind') or 'dnsmaq') != 'unifi' or not target.get('enabled', True):
+            continue
+        peer = dict(target)
+        peer['verify'] = target.get('verify') or 'insecure'
+        try:
+            items = unifi.read_leases(peer)
+        except Exception as e:
+            out.append({'target': target['name'], 'ok': False, 'error': str(e)})
+            continue
+        stored, removed = record_leases(target['name'], items)
+        out.append({'target': target['name'], 'ok': True,
+                    'leases': stored, 'expired': removed})
+    return out
+
+
+def start_refresher():
+    """Daemon thread keeping the overlay current without anyone clicking.
+    Observed state should be re-observed on a schedule — that is the whole
+    point of it being disposable. Sleeps FIRST: a boot loop must not hammer
+    the gateway with logins, and startup already has enough to do."""
+    if LEASE_MINUTES <= 0:
+        return
+
+    def loop():
+        while True:
+            time.sleep(LEASE_MINUTES * 60)
+            try:
+                for r in refresh_all():
+                    if not r['ok']:   # success is silent; failures must not be
+                        print('lease refresh %s FAILED: %s'
+                              % (r['target'], r['error']), flush=True)
+            except Exception as ex:
+                print('lease refresh FAILED: %s' % ex, flush=True)
+
+    threading.Thread(target=loop, daemon=True, name='lease-refresh').start()
 
 
 @bp.route('/api/leases')

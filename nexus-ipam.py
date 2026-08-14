@@ -19,8 +19,9 @@ if __name__ == '__main__':
     if _rc is not None:
         sys.exit(_rc)
     app.secret_key = auth.ensure_bootstrap()['secret_key']
-    from nexusipam import backup
+    from nexusipam import backup, leases
     backup.start_scheduler()
+    leases.start_refresher()
     ssl_context = None
     if config.TLS_ENABLED:
         tls.ensure_tls_cert()
