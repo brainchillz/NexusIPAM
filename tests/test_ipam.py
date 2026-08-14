@@ -2415,6 +2415,15 @@ def test_technitium_plan_dhcp_scopes_by_name(client):
                              mirror=True, manage_state=True)
     assert p['delete'] == ['Default'] and p['enable'] == ['lan']
 
+    # The server enables a scope on creation (found live). A NEW scope must
+    # therefore be explicitly forced to its rightful state right after the
+    # create: OFF without the state flag, the plan's bit with it.
+    p = technitium.plan_dhcp(payload, [], lambda n: (_ for _ in ()).throw(
+        AssertionError('no existing scopes to fetch')))
+    assert p['created'] == 1 and p['post_state'] == [('lan', False)]
+    p = technitium.plan_dhcp(payload, [], lambda n: None, manage_state=True)
+    assert p['post_state'] == [('lan', True)]
+
 
 def test_technitium_target_push_drift_and_leases(client, monkeypatch):
     from nexusipam import pushout, technitium

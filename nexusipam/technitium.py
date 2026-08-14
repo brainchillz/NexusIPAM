@@ -418,8 +418,9 @@ def plan_dhcp(payload, scope_list, get_scope, mirror=False, manage_state=False):
     desired = scopes_from_payload(payload or {})
     existing = {s['name']: s for s in scope_list}
     p = {'set': [], 'enable': [], 'disable': [], 'delete': [],
-         'created': 0, 'updated': 0, 'deleted': 0, 'unchanged': 0,
-         'conflicts': [], 'kept': 0, 'skipped_reservations': 0}
+         'post_state': [], 'created': 0, 'updated': 0, 'deleted': 0,
+         'unchanged': 0, 'conflicts': [], 'kept': 0,
+         'skipped_reservations': 0}
 
     by_scope = {name: [] for name in desired}
     for l in payload.get('static_leases') or []:
@@ -451,6 +452,13 @@ def plan_dhcp(payload, scope_list, get_scope, mirror=False, manage_state=False):
         if cur is None:
             p['set'].append((fields, True))
             p['created'] += 1
+            # The server ENABLES a scope on creation (observed live — the
+            # probe never checked). Never rely on that: without the state
+            # flag, a scope this adapter just created must end up OFF —
+            # creating a DHCP server is not licence to start it — and with
+            # the flag it follows the plan's enabled bit.
+            p['post_state'].append((name, scope['enabled'] if manage_state
+                                    else False))
         else:
             full = get_scope(name)
             if _scope_current_matches(fields, full):
@@ -500,9 +508,17 @@ def sync_dhcp(peer, payload, client=None):
                     summary['errors'].append('%s: %s' % (label, e))
                 return False
 
+        post_state = dict(p['post_state'])
         for fields, is_new in p['set']:
-            if _run(lambda: client.set_scope(**fields), fields['name']):
+            name = fields['name']
+            if _run(lambda: client.set_scope(**fields), name):
                 summary['created' if is_new else 'updated'] += 1
+                if name in post_state:
+                    # Immediately, not in a later pass: the auto-enabled
+                    # window on a fresh scope should be as short as possible.
+                    on = post_state[name]
+                    _run(lambda: (client.enable_scope(name) if on
+                                  else client.disable_scope(name)), name)
         for name in p['enable']:
             _run(lambda: client.enable_scope(name), name)
         for name in p['disable']:
