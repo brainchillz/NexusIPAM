@@ -1469,6 +1469,145 @@ def test_push_counts_report_records_not_section_keys(client, monkeypatch):
     assert r['counts']['dhcp'] == 3
 
 
+# ─── UniFi DHCP adapter ───────────────────────────────────────────────
+
+_UNIFI_NET = {'192.168.9.0/24': {
+    '_id': 'n1', 'name': 'LAN', 'ip_subnet': '192.168.9.1/24', 'vlan': 9,
+    'purpose': 'corporate', 'igmp_snooping': True, 'ipv6_interface_type': 'none',
+    'dhcpd_enabled': True, 'dhcpd_start': '192.168.9.100',
+    'dhcpd_stop': '192.168.9.200', 'dhcpd_leasetime': 86400}}
+
+
+def _payload(**over):
+    p = {'ranges': [{'start': '192.168.9.50', 'end': '192.168.9.99',
+                     'netmask': '255.255.255.0', 'lease': '12h',
+                     'tag': 'lan', 'enabled': True}],
+         'options': [{'tag': 'lan', 'option': 'option:router', 'value': '192.168.9.1'},
+                     {'tag': 'lan', 'option': 'option:dns-server',
+                      'value': '192.168.9.53,1.1.1.1'}],
+         'static_leases': []}
+    p.update(over)
+    return p
+
+
+def test_unifi_dhcp_maps_dnsmasq_options_onto_gateway_fields():
+    from nexusipam import unifi
+    d = unifi.desired_dhcp(_payload(options=[
+        {'tag': 'lan', 'option': 'option:router', 'value': '192.168.9.1'},
+        {'tag': 'lan', 'option': '6', 'value': '192.168.9.53'},
+        {'tag': 'lan', 'option': 'option:ntp-server', 'value': '192.168.9.5'},
+        {'tag': 'lan', 'option': '66', 'value': '192.168.9.236'},
+        {'tag': 'lan', 'option': '67', 'value': 'netboot.xyz.kpxe'}]))
+    scope = d['192.168.9.0/24']
+    assert scope['lease'] == 43200                       # 12h -> seconds
+    changes = unifi._scope_changes(scope, _UNIFI_NET['192.168.9.0/24'], False)
+    assert changes['dhcpd_start'] == '192.168.9.50'
+    assert changes['dhcpd_gateway'] == '192.168.9.1' and changes['dhcpd_gateway_enabled']
+    assert changes['dhcpd_dns_1'] == '192.168.9.53' and changes['dhcpd_dns_2'] == ''
+    assert changes['dhcpd_ntp_1'] == '192.168.9.5'
+    assert changes['dhcpd_tftp_server'] == '192.168.9.236'
+    assert changes['dhcpd_boot_filename'] == 'netboot.xyz.kpxe'
+    assert changes['dhcpd_boot_server'] == '192.168.9.236'
+
+
+def test_unifi_dhcp_never_touches_the_scope_switch_unless_asked():
+    """Turning a VLAN's DHCP server off is an outage, not a config tweak."""
+    from nexusipam import unifi
+    scope = unifi.desired_dhcp(_payload(ranges=[
+        {'start': '192.168.9.50', 'end': '192.168.9.99', 'netmask': '255.255.255.0',
+         'lease': '12h', 'tag': 'lan', 'enabled': False}]))['192.168.9.0/24']
+    raw = _UNIFI_NET['192.168.9.0/24']
+    assert 'dhcpd_enabled' not in unifi._scope_changes(scope, raw, False)
+    assert unifi._scope_changes(scope, raw, True)['dhcpd_enabled'] is False
+
+
+def test_unifi_dhcp_reports_options_it_cannot_express():
+    """A silently ignored option looks exactly like a satisfied one."""
+    from nexusipam import unifi
+    d = unifi.desired_dhcp(_payload(options=[
+        {'tag': 'lan', 'option': 'option:router', 'value': '192.168.9.1'},
+        {'tag': 'lan', 'option': '119', 'value': 'lab.lan'}]))
+    p = unifi.plan_dhcp(d, _UNIFI_NET, {}, [])
+    assert p['unsupported'] == ['119']
+    # option:router IS expressible, so only the genuinely unmappable one is
+    # reported — otherwise the signal drowns in noise.
+    assert 'option:router' not in p['unsupported']
+    assert p['scopes'], 'the mappable part of the scope must still be applied'
+
+
+def test_unifi_dhcp_flags_a_scope_with_no_matching_gateway_network():
+    from nexusipam import unifi
+    d = unifi.desired_dhcp(_payload(ranges=[
+        {'start': '10.44.0.10', 'end': '10.44.0.20', 'netmask': '255.255.255.0',
+         'lease': '12h', 'tag': 'other', 'enabled': True}]))
+    p = unifi.plan_dhcp(d, _UNIFI_NET, {}, [])
+    assert p['unmatched'] == ['10.44.0.0/24'] and not p['scopes']
+
+
+def test_unifi_reservations_are_set_updated_and_withdrawn():
+    from nexusipam import unifi
+    d = unifi.desired_dhcp(_payload())
+    leases = [{'mac': 'aa:bb:cc:00:00:01', 'ip': '192.168.9.10', 'hostname': 'a'},
+              {'mac': 'aa:bb:cc:00:00:02', 'ip': '192.168.9.11', 'hostname': 'b'}]
+    fixed = {'aa:bb:cc:00:00:02': {'id': 'u2', 'ip': '192.168.9.99'},
+             'aa:bb:cc:00:00:09': {'id': 'u9', 'ip': '192.168.9.50'}}
+    p = unifi.plan_dhcp(d, _UNIFI_NET, fixed, leases, mirror=True)
+    assert [m for m, _l, _c in p['fixed_set']] == ['aa:bb:cc:00:00:01',
+                                                   'aa:bb:cc:00:00:02']
+    assert [m for m, _c in p['fixed_clear']] == ['aa:bb:cc:00:00:09']
+    # Without mirror, a reservation we did not author is left alone.
+    assert unifi.plan_dhcp(d, _UNIFI_NET, fixed, leases)['fixed_clear'] == []
+
+
+def test_unifi_network_update_merges_rather_than_replaces():
+    """The network object carries VLAN, purpose and IPv6 settings this app
+    does not model; a PUT built from our fields alone would blank them."""
+    from nexusipam import unifi
+    sent = {}
+
+    class FakeClient(unifi.UniFiClient):
+        def __init__(self):
+            pass
+        site = 'default'
+        def _req(self, method, path, body=None):
+            sent.update({'method': method, 'path': path, 'body': body})
+            return 200, {}
+
+    FakeClient().update_network(_UNIFI_NET['192.168.9.0/24'],
+                                {'dhcpd_start': '192.168.9.50'})
+    assert sent['method'] == 'PUT' and sent['path'].endswith('/networkconf/n1')
+    assert sent['body']['dhcpd_start'] == '192.168.9.50'
+    assert sent['body']['vlan'] == 9 and sent['body']['purpose'] == 'corporate'
+    assert sent['body']['ipv6_interface_type'] == 'none'
+
+
+def test_unifi_withdrawing_a_reservation_keeps_the_client():
+    """Deleting the client would discard its name, network and history too."""
+    from nexusipam import unifi
+    sent = {}
+
+    class FakeClient(unifi.UniFiClient):
+        def __init__(self):
+            pass
+        site = 'default'
+        def _req(self, method, path, body=None):
+            sent.update({'method': method, 'path': path, 'body': body})
+            return 200, {}
+
+    FakeClient().clear_fixed('u9', 'aa:bb:cc:00:00:09')
+    assert sent['method'] == 'PUT'                    # not DELETE
+    assert sent['body'] == {'use_fixedip': False}
+
+
+def test_lease_seconds_round_trips_dnsmasq_spellings():
+    from nexusipam import unifi
+    assert unifi.lease_seconds('12h') == 43200
+    assert unifi.lease_seconds('90m') == 5400
+    assert unifi.lease_seconds('3600') == 3600
+    assert unifi.lease_seconds('infinite') == 86400
+    assert unifi.lease_seconds('nonsense') == 86400
+
+
 # ─── Multi-section push ───────────────────────────────────────────────
 
 def _fake_section(monkeypatch, name, payload):

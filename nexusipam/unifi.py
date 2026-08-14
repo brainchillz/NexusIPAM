@@ -33,6 +33,7 @@ import ssl
 import json
 import socket
 import hashlib
+import ipaddress
 import http.client
 import urllib.parse
 
@@ -280,6 +281,89 @@ class UniFiClient:
                 out[name.rstrip('.').lower()] = {'id': cid, 'ip': ip}
         return out
 
+    # -- networks and DHCP -------------------------------------------------
+
+    def list_networks(self):
+        """{normalised subnet: raw network object} for LANs that define one."""
+        status, data = self._req('GET', '/proxy/network/api/s/%s/rest/networkconf'
+                                 % self.site)
+        if status >= 400:
+            raise UniFiError('listing networks failed: HTTP %s' % status)
+        out = {}
+        for n in (data or {}).get('data') or []:
+            key = _subnet_key(n.get('ip_subnet') or '')
+            if key and n.get('_id'):
+                out[key] = n
+        return out
+
+    def update_network(self, entry, changes):
+        """PUT the network with `changes` merged over it.
+
+        Merged, never replaced: the object also carries VLAN id, purpose,
+        IGMP and IPv6 configuration that this app does not model, and a PUT
+        built only from our fields would blank all of it.
+        """
+        body = dict(entry)
+        body.update(changes)
+        status, data = self._req('PUT', '/proxy/network/api/s/%s/rest/networkconf/%s'
+                                 % (self.site, entry['_id']), body)
+        if status >= 400:
+            raise UniFiError('updating %s failed: HTTP %s %s'
+                             % (entry.get('name') or entry['_id'], status,
+                                str(data)[:120]))
+
+    def list_fixed(self):
+        """{mac: {'id', 'ip', 'network_id', 'name'}} for fixed-IP clients."""
+        status, data = self._req('GET', '/proxy/network/api/s/%s/rest/user' % self.site)
+        if status >= 400:
+            raise UniFiError('listing clients failed: HTTP %s' % status)
+        out = {}
+        for c in (data or {}).get('data') or []:
+            if not isinstance(c, dict) or not c.get('use_fixedip'):
+                continue
+            mac = (c.get('mac') or '').lower()
+            if mac and c.get('fixed_ip') and c.get('_id'):
+                out[mac] = {'id': c['_id'], 'ip': c['fixed_ip'],
+                            'network_id': c.get('network_id') or '',
+                            'name': c.get('name') or c.get('hostname') or '',
+                            'raw': c}
+        return out
+
+    def set_fixed(self, mac, lease, networks, cur=None):
+        """Bind mac -> ip. Updates the client when it already exists, creates
+        one when it does not (an unknown device with a reservation waiting)."""
+        body = {'mac': mac, 'use_fixedip': True, 'fixed_ip': lease['ip']}
+        net = next((n for k, n in sorted(networks.items())
+                    if in_subnet(lease['ip'], k)), None)
+        if net is None:
+            raise UniFiError('%s is not inside any network on this gateway'
+                             % lease['ip'])
+        body['network_id'] = net['_id']
+        if cur:
+            merged = dict(cur['raw'])
+            merged.update(body)
+            status, data = self._req(
+                'PUT', '/proxy/network/api/s/%s/rest/user/%s' % (self.site, cur['id']),
+                merged)
+        else:
+            if lease.get('hostname'):
+                body['name'] = lease['hostname']
+            status, data = self._req('POST', '/proxy/network/api/s/%s/rest/user'
+                                     % self.site, body)
+        if status >= 400:
+            raise UniFiError('reservation for %s failed: HTTP %s %s'
+                             % (mac, status, str(data)[:120]))
+
+    def clear_fixed(self, cid, mac=''):
+        """Withdraw a reservation by unsetting the flag — NOT by deleting the
+        client, which would also discard its name, network and history."""
+        status, _ = self._req(
+            'PUT', '/proxy/network/api/s/%s/rest/user/%s' % (self.site, cid),
+            {'use_fixedip': False})
+        if status >= 400:
+            raise UniFiError('could not clear the reservation for %s: HTTP %s'
+                             % (mac, status))
+
     def release_client_dns(self, cid, name=''):
         """Untick a client's Local DNS Record. Only that flag is sent, so the
         DHCP reservation (fixed_ip / use_fixedip) is left untouched."""
@@ -406,6 +490,219 @@ def sync_hosts(peer, hosts, client=None):
             client.logout()
 
 
+# ─── DHCP ──────────────────────────────────────────────────────────────────
+#
+# UniFi keeps DHCP on the NETWORK object (rest/networkconf) as named dhcpd_*
+# fields, and fixed reservations on the CLIENT object (rest/user). Both are
+# writable; the hosts-only limit this adapter shipped with described its own
+# scope, not the API's.
+#
+# Two safety rules shape everything below:
+#
+#  * A network object also carries VLAN id, subnet, purpose, IGMP and IPv6
+#    settings. Writes MERGE into the object as fetched — a full-object PUT
+#    built from our fields alone would silently blank everything we do not
+#    model.
+#  * "Remove a reservation" unsets `use_fixedip`; it never deletes the client.
+#    A UniFi client object is also the device's identity, name and history on
+#    the gateway, and deleting it to withdraw an IP binding destroys far more
+#    than was asked.
+
+# dnsmasq option spelling -> the UniFi field(s) that carry it. Both spellings
+# (name and bare code) map to the same place, because IPAM accepts both.
+OPTION_MAP = {
+    'option:router': 'gateway', '3': 'gateway',
+    'option:dns-server': 'dns', '6': 'dns',
+    'option:domain-name': 'domain', '15': 'domain',
+    'option:ntp-server': 'ntp', '42': 'ntp',
+    'option:tftp-server': 'tftp', '66': 'tftp',
+    'option:bootfile-name': 'bootfile', '67': 'bootfile',
+    'option:wpad-url': 'wpad', '252': 'wpad',
+}
+
+_LEASE_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+
+
+def lease_seconds(text, default=86400):
+    """dnsmasq lease ('24h', '90m', '3600', 'infinite') -> seconds."""
+    s = str(text or '').strip().lower()
+    if not s or s == 'infinite':
+        return default
+    unit = _LEASE_UNITS.get(s[-1])
+    try:
+        return int(s[:-1]) * unit if unit else int(s)
+    except ValueError:
+        return default
+
+
+def _subnet_key(value):
+    """Normalise anything subnet-shaped to its network address form, so a
+    gateway's '10.0.0.1/24' matches a plan's '10.0.0.0/24'."""
+    try:
+        return str(ipaddress.ip_network(str(value).strip(), strict=False))
+    except ValueError:
+        return ''
+
+
+def in_subnet(ip, subnet_key):
+    try:
+        return ipaddress.ip_address(str(ip)) in ipaddress.ip_network(subnet_key)
+    except ValueError:
+        return False
+
+
+def desired_dhcp(payload):
+    """The dnsmasq-shaped `dhcp` section -> {subnet: scope} for diffing.
+
+    Ranges carry a netmask, so the subnet each belongs to is derivable without
+    the gateway's help — which keeps this function pure.
+    """
+    by_tag = {}
+    for o in payload.get('options') or []:
+        field = OPTION_MAP.get(str(o.get('option') or '').lower())
+        if field:
+            by_tag.setdefault(o.get('tag') or '', {})[field] = o.get('value') or ''
+    out = {}
+    for r in payload.get('ranges') or []:
+        key = _subnet_key('%s/%s' % (r.get('start'), r.get('netmask')))
+        if not key:
+            continue
+        scope = out.setdefault(key, {'options': {}, 'unsupported': []})
+        scope.update({'start': r.get('start'), 'end': r.get('end'),
+                      'lease': lease_seconds(r.get('lease')),
+                      'enabled': bool(r.get('enabled', True))})
+        scope['options'].update(by_tag.get(r.get('tag') or '', {}))
+    # Anything we cannot express is REPORTED, never dropped on the floor: a
+    # silently ignored option looks identical to a satisfied one.
+    unknown = sorted({str(o.get('option')) for o in payload.get('options') or []
+                      if str(o.get('option') or '').lower() not in OPTION_MAP})
+    for scope in out.values():
+        scope['unsupported'] = unknown
+    return out
+
+
+def _scope_changes(scope, raw, manage_state):
+    """The dhcpd_* fields that differ from what the gateway holds."""
+    want = {'dhcpd_start': scope['start'], 'dhcpd_stop': scope['end'],
+            'dhcpd_leasetime': scope['lease']}
+    opts = scope['options']
+    if opts.get('gateway'):
+        want.update({'dhcpd_gateway_enabled': True,
+                     'dhcpd_gateway': opts['gateway']})
+    if opts.get('dns'):
+        servers = [d for d in str(opts['dns']).split(',') if d][:4]
+        want['dhcpd_dns_enabled'] = True
+        for i in range(1, 5):
+            want['dhcpd_dns_%d' % i] = servers[i - 1] if i <= len(servers) else ''
+    if opts.get('domain'):
+        want['domain_name'] = opts['domain']
+    if opts.get('ntp'):
+        servers = [d for d in str(opts['ntp']).split(',') if d][:2]
+        want['dhcpd_ntp_enabled'] = True
+        for i in range(1, 3):
+            want['dhcpd_ntp_%d' % i] = servers[i - 1] if i <= len(servers) else ''
+    if opts.get('tftp'):
+        want['dhcpd_tftp_server'] = opts['tftp']
+    if opts.get('bootfile'):
+        want.update({'dhcpd_boot_enabled': True,
+                     'dhcpd_boot_filename': opts['bootfile']})
+        if opts.get('tftp'):
+            want['dhcpd_boot_server'] = opts['tftp']
+    if opts.get('wpad'):
+        want['dhcpd_wpad_url'] = opts['wpad']
+    # Turning a VLAN's DHCP server off is not a config tweak, it is an outage.
+    # Only touched when the operator has explicitly asked us to own that.
+    if manage_state:
+        want['dhcpd_enabled'] = scope['enabled']
+    return {k: v for k, v in want.items() if raw.get(k) != v}
+
+
+def plan_dhcp(desired, networks, fixed, leases, mirror=False, manage_state=False):
+    """Pure diff. `networks` is {subnet: raw}, `fixed` {mac: {...}}, `leases`
+    the desired reservations. Returns the same plan vocabulary as plan()."""
+    p = {'scopes': [], 'fixed_set': [], 'fixed_clear': [], 'unmatched': [],
+         'unsupported': [], 'unchanged': 0}
+    for key, scope in sorted(desired.items()):
+        entry = networks.get(key)
+        if entry is None:
+            p['unmatched'].append(key)      # no such network on the gateway
+            continue
+        changes = _scope_changes(scope, entry, manage_state)
+        if changes:
+            p['scopes'].append((entry, key, changes))
+        else:
+            p['unchanged'] += 1
+        for o in scope.get('unsupported') or []:
+            if o not in p['unsupported']:
+                p['unsupported'].append(o)
+
+    want = {l['mac'].lower(): l for l in leases if l.get('mac') and l.get('ip')}
+    for mac, l in sorted(want.items()):
+        cur = fixed.get(mac)
+        if cur is None or cur.get('ip') != l['ip']:
+            p['fixed_set'].append((mac, l, cur))
+        else:
+            p['unchanged'] += 1
+    if mirror:
+        for mac, cur in sorted(fixed.items()):
+            if mac not in want:
+                p['fixed_clear'].append((mac, cur))
+    return p
+
+
+def sync_dhcp(peer, payload, client=None):
+    """Reconcile a gateway's DHCP scopes and reservations with the plan."""
+    desired = desired_dhcp(payload or {})
+    mirror = bool(peer.get('unifi_delete_extra', False))
+    manage_state = bool(peer.get('unifi_manage_scope_state', False))
+    if not desired and mirror:
+        raise UniFiError('no DHCP scopes to push; refusing to strip the gateway')
+
+    own = client is None
+    if own:
+        session = HttpsSession(peer['url'], peer.get('verify', 'system'))
+        client = UniFiClient(session, peer.get('unifi_site') or 'default')
+        client.login(peer.get('unifi_username') or '', peer.get('unifi_password') or '')
+    try:
+        networks = client.list_networks()
+        fixed = client.list_fixed()
+        p = plan_dhcp(desired, networks, fixed, payload.get('static_leases') or [],
+                      mirror=mirror, manage_state=manage_state)
+        summary = {'created': 0, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                   'unchanged': p['unchanged'], 'covered': 0, 'failed': 0,
+                   'conflicts': [], 'errors': []}
+
+        def _run(fn, label):
+            try:
+                fn()
+                return True
+            except UniFiError as e:
+                summary['failed'] += 1
+                if len(summary['errors']) < 5:
+                    summary['errors'].append('%s: %s' % (label, e))
+                return False
+
+        for entry, key, changes in p['scopes']:
+            if _run(lambda: client.update_network(entry, changes), key):
+                summary['updated'] += 1
+        for mac, l, cur in p['fixed_set']:
+            if _run(lambda: client.set_fixed(mac, l, networks, cur), mac):
+                summary['created' if cur is None else 'updated'] += 1
+        for mac, cur in p['fixed_clear']:
+            if _run(lambda: client.clear_fixed(cur['id'], mac), mac):
+                summary['deleted'] += 1
+        # Surfaced as conflicts so the push reports FAILED rather than a
+        # cheerful "unchanged" while part of the plan never arrived.
+        for key in p['unmatched']:
+            summary['conflicts'].append((key, 'in the plan', 'no such network on the gateway'))
+        for opt in p['unsupported']:
+            summary['conflicts'].append((opt, 'in the plan', 'no UniFi equivalent'))
+        return summary
+    finally:
+        if own:
+            client.logout()
+
+
 # Which sections this adapter can reconcile. Registering a section here is
 # what makes it pushable to a gateway at all — a section with no syncer is
 # skipped rather than silently reported as applied.
@@ -414,7 +711,7 @@ def sync_hosts(peer, hosts, client=None):
 # object: binding at import would freeze whatever was defined then, so the
 # module attribute would stop being the single source of truth (and could not
 # be substituted in tests).
-SECTION_SYNCERS = {'hosts': 'sync_hosts'}
+SECTION_SYNCERS = {'hosts': 'sync_hosts', 'dhcp': 'sync_dhcp'}
 
 
 def syncer_for(section):
