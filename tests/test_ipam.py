@@ -2389,8 +2389,14 @@ def test_technitium_plan_dhcp_scopes_by_name(client):
                     'netmask': '255.255.255.0', 'lease': '24h', 'tag': 'lan',
                     'enabled': True}],
         'options': [],
-        'static_leases': [{'mac': 'aa:bb:cc:00:84:02', 'ip': '10.99.9.9',
-                           'hostname': 'far'}],       # outside every scope
+        'static_leases': [
+            {'mac': 'aa:bb:cc:00:84:02', 'ip': '10.99.9.9',
+             'hostname': 'far'},                       # outside every subnet
+            # In the subnet but outside the start–end range: dnsmasq/UniFi
+            # reserve these happily, Technitium refuses them (found live) —
+            # counted and reported, never failing the write.
+            {'mac': 'aa:bb:cc:00:84:03', 'ip': '10.0.0.5',
+             'hostname': 'below-range'}],
     }
     scope_list = [{'name': 'Default', 'enabled': False},
                   {'name': 'lan', 'enabled': False}]
@@ -2402,7 +2408,8 @@ def test_technitium_plan_dhcp_scopes_by_name(client):
     p = technitium.plan_dhcp(payload, scope_list, lambda n: current[n])
     assert p['updated'] == 1 and p['created'] == 0
     assert p['kept'] == 1                        # foreign 'Default' untouched
-    assert p['skipped_reservations'] == 1
+    assert p['skipped_reservations'] == 2
+    assert any('outside every scope range' in c[2] for c in p['conflicts'])
     assert p['enable'] == []                     # manage_state off
     p = technitium.plan_dhcp(payload, scope_list, lambda n: current[n],
                              mirror=True, manage_state=True)

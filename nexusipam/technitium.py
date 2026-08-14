@@ -425,10 +425,25 @@ def plan_dhcp(payload, scope_list, get_scope, mirror=False, manage_state=False):
     for l in payload.get('static_leases') or []:
         home = next((name for name, sc in desired.items()
                      if ipaddress.ip_address(l['ip']) in sc['subnet']), None)
+        # Found live, not in any doc: Technitium refuses a reserved lease
+        # outside the scope's start–end RANGE — unlike dnsmasq and UniFi,
+        # where a reservation can sit anywhere in the subnet. Inexpressible
+        # here, so it is counted and reported rather than failing the write.
+        if home is not None:
+            sc = desired[home]
+            ip = ipaddress.ip_address(l['ip'])
+            if not (ipaddress.ip_address(sc['start']) <= ip
+                    <= ipaddress.ip_address(sc['end'])):
+                home = None
         if home is None:
             p['skipped_reservations'] += 1
         else:
             by_scope[home].append(l)
+    if p['skipped_reservations']:
+        p['conflicts'].append(
+            ('%d reservation(s)' % p['skipped_reservations'], 'in the plan',
+             'outside every scope range — Technitium cannot reserve an '
+             'address it does not lease'))
 
     for name, scope in sorted(desired.items()):
         fields = scope_fields(name, scope, by_scope[name])
