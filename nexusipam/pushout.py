@@ -39,6 +39,17 @@ SERIAL_KEY = 'push_serial'
 SOURCE_NAME = 'nexus-ipam'          # how this IPAM identifies itself to nodes
 PUSH_TIMEOUT = 30
 
+# Two kinds of target:
+#   'dnsmaq' — a DNSMAQ-MGR node, which receives the mirror payload on its own
+#     API and locks the pushed section read-only.
+#   'unifi'  — a UniFi Cloud Gateway, which has no mirror endpoint: its Static
+#     DNS is reconciled against our records by the unifi adapter. Push-only,
+#     hosts-equivalent data only, and nothing there to lock.
+# Reaching the gateway directly (rather than via a DNSMAQ-MGR node re-pushing
+# downstream) is the same rule already applied to ns1/ns2: every target is
+# pushed independently, so no target's freshness depends on another being up.
+KINDS = ('dnsmaq', 'unifi')
+
 # DNSMAQ-MGR record ids (h_xxxxxx) — only ids of this shape survive its
 # mirror-receive `_keep_id`; anything else gets a fresh id there.
 RE_DNSMAQ_ID = re.compile(r'^[a-z]_[0-9a-f]{6}\Z')
@@ -85,8 +96,11 @@ def _save_targets(targets):
 
 
 def _public(t):
+    """Target as the UI sees it — every secret reduced to a boolean."""
     out = dict(t)
+    out.setdefault('kind', 'dnsmaq')
     out['has_token'] = bool(out.pop('token', ''))
+    out['has_password'] = bool(out.pop('unifi_password', ''))
     return out
 
 
@@ -109,8 +123,41 @@ def _check_fingerprint(url, want):
     return None
 
 
+def _push_unifi(target, records):
+    """Reconcile a gateway's Static DNS against our records. Returns (ok, detail).
+
+    Unlike a mirror push — one request, applied or refused whole — this is
+    list/diff/N-writes, so individual records can fail while the rest land.
+    The summary is reported rather than flattened to ok/failed: "2 conflicts,
+    client DNS holds x at y" is the kind of thing an operator has to see to
+    act on.
+    """
+    from . import unifi
+    peer = dict(target)
+    # A target saved before `verify` existed has no key at all, and the
+    # adapter's own default is 'system' — which would fail against the
+    # gateway's self-signed cert. Match this module's default instead.
+    peer['verify'] = target.get('verify') or 'insecure'
+    try:
+        s = unifi.sync_hosts(peer, records)
+    except Exception as e:                       # unreachable, login refused, …
+        return False, str(e)
+    parts = ['%d created' % s['created'], '%d updated' % s['updated'],
+             '%d deleted' % s['deleted'], '%d unchanged' % s['unchanged']]
+    if s['claimed']:
+        parts.append('%d claimed from client DNS' % s['claimed'])
+    if s['covered']:
+        parts.append('%d already covered by client DNS' % s['covered'])
+    detail = ', '.join(parts)
+    if s['failed'] or s['conflicts']:
+        return False, '%s (%s)' % (unifi.status_line(s), detail)
+    return True, detail
+
+
 def push_target(target, records, serial):
-    """One push to one node. Returns (ok, detail)."""
+    """One push to one target. Returns (ok, detail)."""
+    if target.get('kind') == 'unifi':
+        return _push_unifi(target, records)
     verify = target.get('verify') or 'insecure'
     if verify.startswith('fingerprint:'):
         e = _check_fingerprint(target['url'], verify.split(':', 1)[1])
@@ -169,22 +216,66 @@ def push_target_save():
     cur = next((t for t in targets if t['name'] == name), None)
     t = dict(cur or {'name': name, 'token': '', 'enabled': True,
                      'last': None, 'serial': 0})
+    kind = str(data.get('kind') or (cur or {}).get('kind') or 'dnsmaq').strip().lower()
+    if kind not in KINDS:
+        return err('Target type must be one of: %s' % ', '.join(KINDS))
+    t['kind'] = kind
+
     if 'url' in data or not cur:
         url = str(data.get('url') or '').strip().rstrip('/')
         if not RE_URL.match(url):
             return err('Invalid URL (https://host[:port])')
         t['url'] = url
-    if data.get('token'):                       # omitted = keep stored token
-        t['token'] = str(data['token']).strip()
-    if not t.get('token'):
-        return err('A mirror token is required (generate one on the node: '
-                   'Mirroring → receive token)')
+
+    if kind == 'unifi':
+        t.pop('token', None)                    # gateways authenticate as a user
+        username, e = clean_text(data.get('unifi_username'), 'Gateway username', 64)
+        if e:
+            return err(e)
+        if username:
+            t['unifi_username'] = username
+        if not t.get('unifi_username'):
+            return err('A gateway username is required')
+        if data.get('unifi_password'):          # omitted = keep stored password
+            password = str(data['unifi_password'])
+            if len(password) > 256:
+                return err('Gateway password is too long (max 256 characters)')
+            t['unifi_password'] = password
+        if not t.get('unifi_password'):
+            return err('A gateway password is required (use a local admin with '
+                       'MFA disabled — the API refuses a 2FA login)')
+        if 'unifi_site' in data or not cur:
+            site = str(data.get('unifi_site') or 'default').strip()
+            if not RE_SLUG.match(site):
+                return err('Invalid UniFi site name')
+            t['unifi_site'] = site
+        # Both default OFF. delete_extra makes this IPAM authoritative over the
+        # gateway's whole A/AAAA table; claim_client_dns unticks a client's own
+        # Local DNS Record so a static entry for that name is accepted. Neither
+        # should happen because someone added a target and pressed save.
+        for flag in ('unifi_delete_extra', 'unifi_claim_client_dns'):
+            if flag in data or not cur:
+                t[flag] = bool(data.get(flag))
+    else:
+        # Switching a target away from 'unifi' must not leave the gateway's
+        # admin password sitting in the store for a target that can no longer
+        # use it.
+        for k in ('unifi_username', 'unifi_password', 'unifi_site',
+                  'unifi_delete_extra', 'unifi_claim_client_dns'):
+            t.pop(k, None)
+        if data.get('token'):                   # omitted = keep stored token
+            t['token'] = str(data['token']).strip()
+        if not t.get('token'):
+            return err('A mirror token is required (generate one on the node: '
+                       'Mirroring → receive token)')
+
     if 'verify' in data:
         v = str(data.get('verify') or 'insecure').strip()
         if v != 'insecure':
             if not v.startswith('fingerprint:') or not RE_FPR.match(v.split(':', 1)[1]):
                 return err("verify must be 'insecure' or 'fingerprint:<sha256>'")
         t['verify'] = v
+    t.setdefault('verify', 'insecure')
     if 'enabled' in data:
         t['enabled'] = bool(data['enabled'])
     desc, e = clean_text(data.get('description'), 'Description', 200)
@@ -199,7 +290,7 @@ def push_target_save():
     with db.WRITE_LOCK:
         _save_targets(targets)
         db.audit(actor(), 'push-target', 'push', None,
-                 '%s → %s' % (name, t.get('url', '')))
+                 '%s (%s) → %s' % (name, kind, t.get('url', '')))
     return jsonify({'success': True, 'target': _public(t)})
 
 

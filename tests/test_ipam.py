@@ -1264,6 +1264,160 @@ def test_push_failure_recorded(client, monkeypatch):
     assert t['serial'] == 0                          # never acked anything
 
 
+# ─── UniFi gateway targets ────────────────────────────────────────────
+# The adapter is vendored from DNSMAQ-MGR and exhaustively tested there; what
+# is tested here is the seam — that IPAM's rendered records feed it unchanged,
+# and that the target plumbing around it behaves.
+
+def test_build_hosts_feeds_the_unifi_adapter_unchanged(client):
+    """The compat claim the whole direct-push design rests on: the payload
+    build_hosts() emits for a mirror push IS the adapter's input format, so
+    nothing translates between the address plan and the gateway."""
+    from nexusipam import pushout, unifi
+    a1 = _mk_addr(client, '10.30.0.5')
+    client.post('/api/addresses/%d/names' % a1, json={'names': [
+        'canon.lan', 'alias.lan', {'name': 'off.lan', 'enabled': False}]})
+    _mk_addr(client, '2001:db8::7', dns_name='v6.lan')
+
+    recs = unifi.records_from_hosts(pushout.build_hosts())
+    assert recs == [('canon.lan', 'A', '10.30.0.5'),
+                    ('alias.lan', 'A', '10.30.0.5'),
+                    ('v6.lan', 'AAAA', '2001:db8::7')]   # disabled name dropped
+
+
+def test_unifi_plan_diffs_and_respects_client_dns():
+    from nexusipam import unifi
+    desired = [('keep.lan', 'A', '10.0.0.1'), ('move.lan', 'A', '10.0.0.2'),
+               ('new.lan', 'A', '10.0.0.3')]
+    static = {('keep.lan', 'A'): {'id': 'r1', 'value': '10.0.0.1', 'raw': {}},
+              ('move.lan', 'A'): {'id': 'r2', 'value': '10.9.9.9', 'raw': {}},
+              ('extra.lan', 'A'): {'id': 'r3', 'value': '10.0.0.8', 'raw': {}}}
+
+    p = unifi.plan(desired, static, {}, mirror=True)
+    assert p['unchanged'] == 1
+    assert [x[0] for x in p['create']] == ['new.lan']
+    assert [x[1] for x in p['update']] == ['move.lan']
+    assert [x[1] for x in p['delete']] == ['extra.lan']
+
+    # mirror off: an entry we did not create is left alone.
+    assert unifi.plan(desired, static, {}, mirror=False)['delete'] == []
+
+    # A name owned by a client's Local DNS Record shadows Static DNS: agreeing
+    # is "covered", disagreeing is a conflict, and claim takes it over.
+    owned = {'new.lan': {'id': 'c1', 'ip': '10.0.0.3'}}
+    assert unifi.plan(desired, static, owned, mirror=False)['covered'] == ['new.lan']
+    wrong = {'new.lan': {'id': 'c1', 'ip': '10.5.5.5'}}
+    assert unifi.plan(desired, static, wrong, mirror=False)['conflicts'] == \
+        [('new.lan', '10.0.0.3', '10.5.5.5')]
+    claimed = unifi.plan(desired, static, wrong, mirror=False, claim=True)['claim']
+    assert [x[0] for x in claimed] == ['new.lan']
+
+
+def test_unifi_target_validation_and_secret_hiding(client):
+    bad_kind = client.post('/api/push/targets',
+                           json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'nope'})
+    assert bad_kind.status_code == 400
+
+    base = {'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi'}
+    assert client.post('/api/push/targets', json=base).status_code == 400   # no user
+    assert client.post('/api/push/targets',
+                       json={**base, 'unifi_username': 'admin'}
+                       ).status_code == 400                                # no password
+    assert client.post('/api/push/targets',
+                       json={**base, 'unifi_username': 'admin',
+                             'unifi_password': 'pw', 'unifi_site': 'bad site'}
+                       ).status_code == 400                                # site slug
+
+    r = client.post('/api/push/targets',
+                    json={**base, 'unifi_username': 'admin', 'unifi_password': 'pw'})
+    assert r.status_code == 200, r.json
+    t = r.json['target']
+    assert t['kind'] == 'unifi' and t['has_password'] is True
+    assert 'unifi_password' not in t
+    assert t['unifi_site'] == 'default'
+    # Both destructive behaviours are opt-in, never a side effect of saving.
+    assert t['unifi_delete_extra'] is False and t['unifi_claim_client_dns'] is False
+    assert client.get('/api/push').json['targets'][0].get('unifi_password') is None
+
+
+def test_unifi_target_edit_keeps_stored_password(client):
+    client.post('/api/push/targets',
+                json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi',
+                      'unifi_username': 'admin', 'unifi_password': 'pw'})
+    r = client.post('/api/push/targets',
+                    json={'name': 'gw', 'unifi_delete_extra': True})
+    assert r.status_code == 200, r.json
+    assert r.json['target']['has_password'] and r.json['target']['unifi_delete_extra']
+    from nexusipam import pushout
+    assert pushout._targets()[0]['unifi_password'] == 'pw'
+
+
+def test_push_run_dispatches_to_the_unifi_adapter(client, monkeypatch):
+    from nexusipam import unifi
+    client.post('/api/push/targets',
+                json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi',
+                      'unifi_username': 'admin', 'unifi_password': 'pw'})
+    _mk_addr(client, '10.30.0.99', dns_name='pushme.lan')
+
+    seen = {}
+
+    def fake_sync(peer, hosts, client=None):
+        seen['peer'], seen['hosts'] = peer, hosts
+        return {'created': 1, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                'unchanged': 3, 'covered': 0, 'conflicts': [], 'failed': 0,
+                'errors': []}
+
+    monkeypatch.setattr(unifi, 'sync_hosts', fake_sync)
+    r = client.post('/api/push/run')
+    assert r.json['success'] is True
+    assert [h['name'] for h in seen['hosts']] == ['pushme.lan']
+    # No mirror token is invented for a gateway, and the verify default is this
+    # module's ('insecure'), not the adapter's ('system' — which would reject
+    # the gateway's self-signed cert).
+    assert 'token' not in seen['peer'] and seen['peer']['verify'] == 'insecure'
+    assert client.get('/api/push').json['targets'][0]['last']['detail'] == \
+        '1 created, 0 updated, 0 deleted, 3 unchanged'
+
+
+def test_push_run_reports_unifi_conflicts_as_failure(client, monkeypatch):
+    from nexusipam import unifi
+    client.post('/api/push/targets',
+                json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi',
+                      'unifi_username': 'admin', 'unifi_password': 'pw'})
+    monkeypatch.setattr(unifi, 'sync_hosts', lambda peer, hosts, client=None: {
+        'created': 0, 'updated': 0, 'deleted': 0, 'claimed': 0, 'unchanged': 0,
+        'covered': 0, 'conflicts': [('a.lan', '10.0.0.1', '10.9.9.9')],
+        'failed': 0, 'errors': []})
+    r = client.post('/api/push/run')
+    assert r.json['success'] is False
+    detail = client.get('/api/push').json['targets'][0]['last']['detail']
+    assert 'client DNS holds a.lan at 10.9.9.9' in detail
+
+    # An unreachable gateway is a failed target, never a 500.
+    def boom(peer, hosts, client=None):
+        raise unifi.UniFiError('login rejected: bad username or password')
+    monkeypatch.setattr(unifi, 'sync_hosts', boom)
+    r = client.post('/api/push/run')
+    assert r.status_code == 200 and r.json['success'] is False
+    assert 'login rejected' in r.json['results'][0]['detail']
+
+
+def test_target_stored_without_kind_still_pushes_as_dnsmaq(client, monkeypatch):
+    """Targets written before `kind` existed (ns1/ns2 on the live instance)
+    must keep working untouched."""
+    from nexusipam import pushout
+    pushout._save_targets([{'name': 'ns1', 'url': 'https://ns1:8443',
+                            'token': 'dmm_x', 'enabled': True,
+                            'last': None, 'serial': 0}])
+    assert client.get('/api/push').json['targets'][0]['kind'] == 'dnsmaq'
+    kinds = []
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, recs, serial: (kinds.append(t.get('kind')),
+                                                 (True, 'ok'))[1])
+    assert client.post('/api/push/run').json['success']
+    assert kinds == [None]                   # dispatch defaults, store untouched
+
+
 # ─── Provision / deprovision (phase 3) ────────────────────────────────
 
 def test_provision_full_cycle(client, monkeypatch):

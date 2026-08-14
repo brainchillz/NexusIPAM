@@ -50,3 +50,9 @@ def clean_db():
         conn.execute('DELETE FROM %s' % table)
     conn.execute('DELETE FROM scan_results')
     conn.execute('DELETE FROM audit')
+    # App settings live in `meta` too — push targets, the push serial, sync run
+    # reports. Leaving them behind makes push tests order-dependent: a target
+    # saved by one test gets pushed by the next. schema_version is kept so
+    # init_db() does not re-run the v2 -> v3 name migration on every test.
+    conn.execute("DELETE FROM meta WHERE key <> 'schema_version'")
+    conn.execute('DELETE FROM ip_names')

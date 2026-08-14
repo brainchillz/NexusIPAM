@@ -380,6 +380,45 @@ accept, so syncing is fetch-here / post-there with no translation:
 
 Bare hostnames are qualified with their network's domain on the way out.
 
+### DNS push targets
+
+Exports are pull. The other direction is push: Nexus IPAM renders the address
+plan's names and delivers them to the systems that answer queries, which is
+what makes it the author of DNS rather than a mirror of it. Configure targets
+in Settings → DNS push targets, or drive them with `/api/push/*`.
+
+Two kinds of target:
+
+- **DNSMAQ-MGR node** — receives the `hosts` section on its own
+  `POST /api/mirror/receive`. The node re-validates every record, gates the
+  swap with `dnsmasq --test`, and locks that section read-only in its UI, so
+  there is exactly one writer. Authenticated with a per-node mirror token.
+- **UniFi Cloud Gateway** — has no mirror endpoint, so its Static DNS is
+  reconciled directly against the same records (create / update / delete,
+  A and AAAA only; CNAME, TXT and the rest are left alone). Authenticated as a
+  local gateway admin with MFA disabled, since the API refuses a 2FA login.
+
+Every target is pushed **independently**, carrying one monotonic serial per
+run — no target's freshness depends on another being reachable, and a node
+that rejects a stale serial is protected from replay and reordering. TLS is
+either `insecure` or pinned to a certificate fingerprint, which is the useful
+pair for self-signed appliances.
+
+Two UniFi behaviours are worth knowing before enabling that kind:
+
+- Gateways keep a *second* DNS store — a per-client "Local DNS Record" on
+  fixed-IP clients — which shadows Static DNS and makes the gateway refuse a
+  static entry for a name a client already owns. Such names are reported as
+  conflicts by default; *Take names held by a client's own Local DNS Record*
+  unticks the client's flag so the static entry is accepted (its DHCP
+  reservation is left untouched).
+- *Delete Static DNS entries this IPAM did not create* is **off** by default,
+  so a first sync only adds and updates. Turning it on makes Nexus IPAM
+  authoritative over the gateway's whole A/AAAA table.
+
+`POST /api/provision` chains the whole thing — next free address, names,
+push — into one call, and `POST /api/deprovision` is its exact inverse.
+
 ### VC-Deployer
 
 The allocation response maps one-to-one onto `DeploySpec`
@@ -467,6 +506,9 @@ nexusipam/
   core/runcmd.py        shell-free command execution
   core/tls.py           self-signed generation, cert upload
   netutil.py            prefix maths, hex bounds, usable-range rules
+  pushout.py            DNS push targets, render + deliver, serials
+  unifi.py              UniFi gateway Static DNS adapter (vendored)
+  provision.py          one-action provision / deprovision
   resource.py           generic REST machinery (one implementation, ten tables)
   networks.py           VLANs, networks, containment, utilization
   addresses.py          address records, search, lookup, bulk import

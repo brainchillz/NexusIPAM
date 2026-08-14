@@ -65,6 +65,8 @@ async function page_settings() {
     <h3 style="margin-top:24px">DNS push targets</h3>
     <p class="help">Pushes the address plan's names to DNSMAQ-MGR nodes via their mirror-receive
       endpoint — the pushed section locks read-only on the node, making this IPAM the single writer.
+      A UniFi gateway is pushed too, by reconciling its Static DNS directly. Every target is
+      pushed independently, so none goes stale because another is down.
       Currently <strong>${push.record_count}</strong> host record(s) across ${push.address_count} address(es)
       would be pushed (serial ${push.serial}).</p>
     <div class="toolbar">
@@ -74,6 +76,10 @@ async function page_settings() {
     </div>
     ${dataTable([
       {label: 'Target', get: t => `<strong>${escapeHtml(t.name)}</strong><br><span class="muted">${escapeHtml(t.url || '')}</span>`},
+      {label: 'Type', get: t => t.kind === 'unifi'
+        ? `<span class="status-badge">UniFi gateway</span>${t.unifi_delete_extra
+             ? '<br><span class="muted">authoritative</span>' : '<br><span class="muted">additive</span>'}`
+        : '<span class="status-badge">DNSMAQ-MGR</span>'},
       {label: 'Enabled', get: t => t.enabled ? '<span class="status-badge green">yes</span>' : '<span class="status-badge gray">no</span>'},
       {label: 'Last push', get: t => t.last
         ? `${t.last.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'}
@@ -81,7 +87,7 @@ async function page_settings() {
         : '<span class="muted">never</span>'},
       {label: '', cls: 'row-actions', get: t => `
         <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
-        <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}')">Remove</button>`},
+        <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}','${jsArg(t.kind || 'dnsmaq')}')">Remove</button>`},
     ], push.targets || [], 'No push targets — this IPAM is not yet writing DNS anywhere')}` : ''}
 
     <h3 style="margin-top:24px">Sidebar banner</h3>
@@ -375,31 +381,76 @@ async function showAudit() {
 // ─── DNS push targets ───────────────────────────────────
 function pushTargetModal() {
   openModal('Add DNS push target', `
+    <div class="form-group"><label>Type</label>
+      <select id="pt-kind" class="form-control" onchange="pushTargetKind()">
+        <option value="dnsmaq">DNSMAQ-MGR node (mirror push)</option>
+        <option value="unifi">UniFi Cloud Gateway (Static DNS)</option>
+      </select></div>
     <div class="form-group"><label>Name</label>
       <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"></div>
-    <div class="form-group"><label>URL (DNSMAQ-MGR base)</label>
+    <div class="form-group"><label>URL</label>
       <input id="pt-url" class="form-control" placeholder="https://dns-node:8443" spellcheck="false"></div>
-    <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
-      <input id="pt-token" class="form-control" placeholder="dmm_…" spellcheck="false"></div>
-    <p class="help">The node must have "accept mirrored config" enabled. The pushed hosts section
-      becomes read-only there; "Detach" on its Mirroring page hands control back at any time.</p>
+
+    <div id="pt-dnsmaq">
+      <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
+        <input id="pt-token" class="form-control" placeholder="dmm_…" spellcheck="false"></div>
+      <p class="help">The node must have "accept mirrored config" enabled. The pushed hosts section
+        becomes read-only there; "Detach" on its Mirroring page hands control back at any time.</p>
+    </div>
+
+    <div id="pt-unifi" style="display:none">
+      <div class="form-group"><label>Gateway username</label>
+        <input id="pt-user" class="form-control" placeholder="admin" autocomplete="off"></div>
+      <div class="form-group"><label>Gateway password</label>
+        <input id="pt-pass" class="form-control" type="password" autocomplete="new-password"></div>
+      <div class="form-group"><label>Site</label>
+        <input id="pt-site" class="form-control" value="default" spellcheck="false"></div>
+      <label class="checkitem" style="padding-left:0"><input id="pt-delextra" type="checkbox">
+        Delete Static DNS entries this IPAM did not create</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-claim" type="checkbox">
+        Take names held by a client's own Local DNS Record</label>
+      <p class="help">Use a local admin with MFA disabled — the gateway API refuses a 2FA login.
+        The first option makes this IPAM authoritative over the gateway's whole A/AAAA table;
+        leave it off and the sync only adds and updates. The second unticks a client's Local DNS
+        Record (its DHCP reservation is left alone) so a static entry for that name is accepted.</p>
+    </div>
     <button class="btn" onclick="pushTargetSave()">Add target</button>`);
 }
 
+function pushTargetKind() {
+  const unifi = $('pt-kind').value === 'unifi';
+  $('pt-unifi').style.display = unifi ? '' : 'none';
+  $('pt-dnsmaq').style.display = unifi ? 'none' : '';
+  $('pt-url').placeholder = unifi ? 'https://192.168.1.1' : 'https://dns-node:8443';
+}
+
 async function pushTargetSave() {
+  const kind = $('pt-kind').value;
   const body = {
+    kind,
     name: $('pt-name').value.trim(),
     url: $('pt-url').value.trim(),
-    token: $('pt-token').value.trim(),
   };
+  if (kind === 'unifi') {
+    body.unifi_username = $('pt-user').value.trim();
+    body.unifi_password = $('pt-pass').value;
+    body.unifi_site = $('pt-site').value.trim() || 'default';
+    body.unifi_delete_extra = $('pt-delextra').checked;
+    body.unifi_claim_client_dns = $('pt-claim').checked;
+  } else {
+    body.token = $('pt-token').value.trim();
+  }
   try {
     await API.post('/api/push/targets', body);
     closeModal(); page_settings();
   } catch (e) { alert(e.message); }
 }
 
-async function pushTargetDelete(name) {
-  if (!confirm(`Remove push target "${name}"? The node keeps its current records but stops receiving updates (detach the section there to unlock local editing).`)) return;
+async function pushTargetDelete(name, kind) {
+  const tail = kind === 'unifi'
+    ? 'The gateway keeps the Static DNS entries it has but stops receiving updates.'
+    : 'The node keeps its current records but stops receiving updates (detach the section there to unlock local editing).';
+  if (!confirm(`Remove push target "${name}"? ${tail}`)) return;
   try { await API.delete('/api/push/targets/' + encodeURIComponent(name)); page_settings(); }
   catch (e) { alert(e.message); }
 }
