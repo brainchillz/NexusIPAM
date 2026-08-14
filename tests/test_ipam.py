@@ -1242,8 +1242,13 @@ def test_push_targets_and_run(client, monkeypatch):
     r = client.post('/api/push/run')
     assert r.json['success'] and r.json['serial'] == 1
     assert pushed == [('ns1', {'hosts': 1})]
+    # Unchanged content re-sends the SAME serial: the number versions the
+    # payload, not the act of pushing it.
     r = client.post('/api/push/run')
-    assert r.json['serial'] == 2                     # monotonic
+    assert r.json['serial'] == 1
+    _mk_addr(client, '10.30.0.98', dns_name='pushme2.lan')
+    r = client.post('/api/push/run')
+    assert r.json['serial'] == 2                     # content changed
     st = client.get('/api/push').json
     assert st['targets'][0]['last']['ok'] and st['targets'][0]['serial'] == 2
 
@@ -1947,7 +1952,8 @@ def test_target_defaults_to_hosts_and_rejects_unknown_sections(client):
 
 def test_serials_are_per_section_and_do_not_cross_contaminate(client, monkeypatch):
     from nexusipam import pushout
-    _fake_section(monkeypatch, 'dhcp', [{'x': 1}])
+    payload = [{'x': 1}]
+    _fake_section(monkeypatch, 'dhcp', payload)
     client.post('/api/push/targets',
                 json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x',
                       'sections': ['hosts', 'dhcp']})
@@ -1958,15 +1964,42 @@ def test_serials_are_per_section_and_do_not_cross_contaminate(client, monkeypatc
     client.post('/api/push/run')
     assert seen[-1] == {'hosts': 1, 'dhcp': 1}
 
-    # A dhcp-only run must not advance the hosts counter: otherwise "is this
-    # node's hosts section current?" stops being answerable from the serial.
+    # A dhcp-only change must not advance the hosts counter: otherwise "is
+    # this node's hosts section current?" stops being answerable from the
+    # serial.
+    payload[0]['x'] = 2
     client.post('/api/push/run?sections=dhcp')
     assert seen[-1] == {'dhcp': 2}
     assert client.get('/api/push').json['serials'] == {'hosts': 1, 'dhcp': 2}
 
+    # And an unchanged hosts payload keeps its version.
     client.post('/api/push/run?sections=hosts')
-    assert seen[-1] == {'hosts': 2}
+    assert seen[-1] == {'hosts': 1}
     assert client.post('/api/push/run?sections=bogus').status_code == 400
+
+
+def test_single_target_push_does_not_strand_the_others(client, monkeypatch):
+    """Serials version CONTENT, not pushes. Pushing one target with an
+    unchanged payload re-sends the current serial (DNSMAQ-MGR rejects only
+    strictly lower ones, so an equal serial re-applies idempotently) — the
+    other subscribers must NOT flip to "behind". The push-counting version
+    of this produced live whack-a-mole: every per-target catch-up push
+    advanced the number the rest were judged by."""
+    from nexusipam import pushout
+    for name in ('ns1', 'ns2'):
+        client.post('/api/push/targets',
+                    json={'name': name, 'url': 'https://%s:8443' % name,
+                          'token': 'dmm_x'})
+    monkeypatch.setattr(pushout, 'push_target',
+                        lambda t, data, serials: (True, 'ok'))
+    _mk_addr(client, '10.31.0.5', dns_name='steady.lan')
+    client.post('/api/push/run')                     # both targets at serial 1
+    for _ in range(3):
+        client.post('/api/push/run?target=ns1')      # repeated one-target pushes
+    st = client.get('/api/push').json
+    assert st['serials']['hosts'] == 1
+    held = {t['name']: t['serials']['hosts'] for t in st['targets']}
+    assert held == {'ns1': 1, 'ns2': 1}              # nobody is "behind"
 
 
 def test_serials_carry_forward_from_the_pre_section_counter(client, monkeypatch):

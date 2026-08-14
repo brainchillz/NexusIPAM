@@ -38,6 +38,7 @@ bp = Blueprint('pushout', __name__)
 TARGETS_KEY = 'push_targets'
 SERIAL_KEY = 'push_serial'          # legacy scalar; per-section counters below
 SERIALS_KEY = 'push_serials'
+HASHES_KEY = 'push_hashes'          # per-section content hash behind the serial
 SOURCE_NAME = 'nexus-ipam'          # how this IPAM identifies itself to nodes
 PUSH_TIMEOUT = 30
 
@@ -219,11 +220,27 @@ def build_sections(names):
 
 
 # ─── Serials ──────────────────────────────────────────────────────────
-# One counter PER SECTION. A single global counter was fine while `hosts` was
-# the only section, but the moment there are two, a dhcp-only change bumps the
-# number `hosts` is judged by and "is this node current?" stops being
-# answerable. The scalar `serial` is still sent, as the max, because
-# DNSMAQ-MGR's receiver accepts both shapes.
+# One counter PER SECTION, advanced only when that section's rendered CONTENT
+# changes. Both halves matter:
+#
+#  * Per section, because with one global counter a dhcp-only change bumps the
+#    number `hosts` is judged by and "is this node current?" stops being
+#    answerable.
+#  * Per content change, because a serial that counts PUSHES cannot answer
+#    that question either: pushing one target advanced the number every other
+#    subscriber was judged by, so the untouched targets read as "behind" while
+#    holding identical content — and pushing them to catch up advanced it
+#    again, marking the first one behind. The first live enablement produced
+#    exactly that whack-a-mole (hosts 19→23 in four pushes, 61 identical
+#    records every time).
+#
+# Re-sending the current serial to a node that already holds it is safe:
+# DNSMAQ-MGR's receiver rejects only strictly LOWER serials (mirror.py checks
+# `<`, not `<=`), so an equal serial re-applies idempotently — which is also
+# what an operator forcing a re-push after suspected drift wants.
+#
+# The scalar `serial` is still sent, as the max, because DNSMAQ-MGR's
+# receiver accepts both shapes.
 
 def _serials():
     try:
@@ -233,8 +250,18 @@ def _serials():
         return {}
 
 
-def _bump_serials(names):
-    """Advance the counter for each named section; returns {section: serial}."""
+def _hashes():
+    try:
+        h = json.loads(db.get_setting(HASHES_KEY, '{}') or '{}')
+        return h if isinstance(h, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _advance_serials(data):
+    """Serial for each section in `data` ({section: payload}), advancing a
+    counter only when that section's payload differs from the last run's.
+    Returns {section: serial} — the numbers the push should carry."""
     with db.WRITE_LOCK:
         cur = _serials()
         if not cur:
@@ -243,11 +270,17 @@ def _bump_serials(names):
             # holds a higher one (it would reject the push as stale).
             legacy = int(db.get_setting(SERIAL_KEY, '0') or 0)
             cur = {s: legacy for s in sections_available()}
-        for s in names:
-            cur[s] = int(cur.get(s, 0)) + 1
+        hashes = _hashes()
+        for s, payload in sorted(data.items()):
+            digest = hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode()).hexdigest()
+            if hashes.get(s) != digest:
+                cur[s] = int(cur.get(s, 0)) + 1
+                hashes[s] = digest
         db.set_setting(SERIALS_KEY, json.dumps(cur))
+        db.set_setting(HASHES_KEY, json.dumps(hashes))
         db.set_setting(SERIAL_KEY, max(cur.values()) if cur else 0)
-    return {s: cur[s] for s in names}
+    return {s: cur[s] for s in data}
 
 
 # ─── Targets (meta-backed) ────────────────────────────────────────────
@@ -534,8 +567,10 @@ def run_push(only='', sections=None):
     target receives only what it subscribes to, so a DNS-only node is not
     handed DHCP just because a scope changed.
 
-    Serials advance PER SECTION, once per run, and every target that acks a
-    section holds the same version of it. Returns a result dict, or
+    Serials advance PER SECTION and only when the section's content changed,
+    so every target that acks a serial holds that exact content, and a
+    single-target push of an unchanged payload leaves the other subscribers
+    current rather than "behind". Returns a result dict, or
     (None, error) when no target matches — shared by the route below and the
     provision workflow.
     """
@@ -554,7 +589,7 @@ def run_push(only='', sections=None):
         return None, ('No matching target subscribes to %s'
                       % ', '.join(wanted or ['any section']))
     data = build_sections(live)
-    serials = _bump_serials(live)
+    serials = _advance_serials(data)
 
     results = []
     for t in picked:
