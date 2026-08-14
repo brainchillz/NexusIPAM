@@ -560,6 +560,106 @@ def push_target_delete(name):
     return jsonify({'success': True})
 
 
+# ─── Drift ────────────────────────────────────────────────────────────
+# Serials answer "did this target ack the current content?" — they cannot
+# answer "does the target still HOLD it?". A DNSMAQ-MGR node locks every
+# pushed section read-only, so there the two questions collapse into one; a
+# gateway's UI stays editable after a push, so its state can walk away
+# silently. This reads the gateway back and diffs it with the same pure
+# planners the push executes — computed writes, performed nowhere.
+
+def run_drift(target, client=None):
+    """Read-only drift report for one unifi target: for each subscribed
+    section, what a push right now would have to change. Raises on an
+    unreachable/refusing gateway; the route wraps that."""
+    from . import unifi
+    peer = dict(target)
+    peer['verify'] = target.get('verify') or 'insecure'
+    data = build_sections(sections_for(target))
+    report = {'ts': db.now(), 'ok': True, 'sections': {}}
+    own = client is None
+    if own:
+        session = unifi.HttpsSession(peer['url'], peer['verify'])
+        client = unifi.UniFiClient(session, peer.get('unifi_site') or 'default')
+        client.login(peer.get('unifi_username') or '', peer.get('unifi_password') or '')
+    try:
+        if 'hosts' in data:
+            p = unifi.plan(unifi.records_from_hosts(data['hosts']),
+                           client.list_static(), client.list_client_dns(),
+                           mirror=bool(peer.get('unifi_delete_extra')),
+                           claim=bool(peer.get('unifi_claim_client_dns')))
+            counts = {'missing': len(p['create']), 'differs': len(p['update']),
+                      'extra': len(p['delete']), 'unclaimed': len(p['claim']),
+                      'conflicts': len(p['conflicts'])}
+            examples = ([('missing %s' % n) for n, _, _ in p['create']]
+                        + [('differs %s' % n) for _, n, _, _ in p['update']]
+                        + [('extra %s' % n) for _, n in p['delete']]
+                        + [('client DNS holds %s' % c[0]) for c in p['claim']])[:6]
+            report['sections']['hosts'] = {'drifted': any(counts.values()),
+                                           'in_step': p['unchanged'],
+                                           'counts': counts, 'examples': examples}
+        if 'dhcp' in data:
+            p = unifi.plan_dhcp(
+                unifi.desired_dhcp(data['dhcp']),
+                client.list_networks(), client.list_fixed(),
+                data['dhcp'].get('static_leases') or [],
+                mirror=bool(peer.get('unifi_dhcp_delete_extra')),
+                manage_state=bool(peer.get('unifi_manage_scope_state')))
+            counts = {'scopes': len(p['scopes']),
+                      'reservations_missing': len(p['fixed_set']),
+                      'reservations_extra': len(p['fixed_clear']),
+                      'unmatched': len(p['unmatched']),
+                      'unsupported': len(p['unsupported'])}
+            examples = ([('scope %s: %s' % (key, ', '.join(sorted(ch))))
+                         for _, key, ch in p['scopes']]
+                        + [('reservation %s -> %s' % (mac, l['ip']))
+                           for mac, l, _ in p['fixed_set']]
+                        + [('extra reservation %s' % mac)
+                           for mac, _ in p['fixed_clear']])[:6]
+            # An unsupported option is a standing modelling gap a push cannot
+            # fix — reported in the counts, but it must not paint the target
+            # permanently red or real drift disappears into the noise.
+            actionable = {k: v for k, v in counts.items() if k != 'unsupported'}
+            report['sections']['dhcp'] = {'drifted': any(actionable.values()),
+                                          'in_step': p['unchanged'],
+                                          'counts': counts, 'examples': examples}
+        return report
+    finally:
+        if own:
+            client.logout()
+
+
+@bp.route('/api/push/targets/<name>/drift', methods=['POST'])
+def push_target_drift(name):
+    targets = _targets()
+    target = next((t for t in targets if t['name'] == name), None)
+    if not target:
+        return err('No such target', 404)
+    if (target.get('kind') or 'dnsmaq') != 'unifi':
+        return err('A DNSMAQ-MGR node locks every pushed section read-only, so '
+                   'it cannot drift — the serial column already answers "is it '
+                   'current?". Only a gateway, whose own UI stays editable, '
+                   'needs this check.', 400)
+    try:
+        report = run_drift(target)
+    except Exception as e:                    # unreachable, login refused, …
+        report = {'ts': db.now(), 'ok': False, 'error': str(e)}
+    with db.WRITE_LOCK:
+        target['drift'] = report
+        _save_targets(targets)
+        drifted = [s for s, v in (report.get('sections') or {}).items()
+                   if v['drifted']]
+        db.audit(actor(), 'drift-check', 'push', None,
+                 '%s: %s' % (name,
+                             'UNREACHABLE: %s' % report.get('error')
+                             if not report['ok'] else
+                             ('drifted: %s' % ', '.join(drifted)
+                              if drifted else 'in sync')))
+    if not report['ok']:
+        return err('Could not read %s: %s' % (name, report.get('error')), 502)
+    return jsonify({'success': True, 'target': name, 'drift': report})
+
+
 def run_push(only='', sections=None):
     """Push to every enabled target (or one, by name).
 

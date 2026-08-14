@@ -92,10 +92,14 @@ async function page_settings() {
         ? `${t.last.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'}
            <span class="muted">${fmtTs(t.last.ts)} · ${escapeHtml(lastSerials(t.last))} · ${escapeHtml(t.last.detail || '')}</span>`
         : '<span class="muted">never</span>'},
+      {label: 'Drift', get: driftCell},
       {label: '', cls: 'row-actions', get: t => `
         <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
         <button class="btn btn-sm btn-outline" onclick="pushTargetModal('${jsArg(t.name)}')">Edit</button>
         ${t.kind === 'unifi' ? `<button class="btn btn-sm btn-outline"
+          title="Read the gateway back and diff it against the plan — read-only"
+          onclick="driftCheck('${jsArg(t.name)}', this)">Drift</button>
+        <button class="btn btn-sm btn-outline"
           title="Read this gateway's networks, DHCP scopes, options and reservations into the plan"
           onclick="pullTargetModal('${jsArg(t.name)}')">Adopt…</button>` : ''}
         <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}','${jsArg(t.kind || 'dnsmaq')}')">Remove</button>`},
@@ -430,6 +434,41 @@ function lastSerials(last) {
     return Object.entries(last.serials).map(([s, n]) => `${s} ${n}`).join(' · ');
   }
   return 'serial ' + last.serial;
+}
+
+// Serials say whether a target ACKED the current content; drift says whether
+// it still HOLDS it. Only a gateway can drift — a DNSMAQ-MGR node locks its
+// pushed sections read-only, which is why its cell is a statement, not a check.
+function driftCell(t) {
+  if (t.kind !== 'unifi') {
+    return '<span class="muted" title="Pushed sections lock read-only on the node, so its state cannot walk away">locked on node</span>';
+  }
+  const d = t.drift;
+  if (!d) return '<span class="muted">unchecked</span>';
+  if (!d.ok) {
+    return `<span class="status-badge red" title="${escapeHtml(d.error || '')}">check failed</span>
+      <span class="muted">${escapeHtml(fmtAgo(d.ts))}</span>`;
+  }
+  const bad = Object.entries(d.sections || {}).filter(([, v]) => v.drifted);
+  if (!bad.length) {
+    return `<span class="status-badge green">in sync</span> <span class="muted">${escapeHtml(fmtAgo(d.ts))}</span>`;
+  }
+  return bad.map(([s, v]) => {
+    const n = Object.values(v.counts || {}).reduce((a, b) => a + b, 0);
+    return `<span class="status-badge red" title="${escapeHtml((v.examples || []).join(' · '))}">${escapeHtml(s)}: ${n} difference(s)</span>`;
+  }).join(' ') + ` <span class="muted">${escapeHtml(fmtAgo(d.ts))}</span>`;
+}
+
+async function driftCheck(name, btn) {
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const r = await API.post('/api/push/targets/' + encodeURIComponent(name) + '/drift', {});
+    const lines = Object.entries(r.drift.sections || {}).map(([s, v]) => v.drifted
+      ? `${s}: DRIFTED — ${(v.examples || []).join('; ')}`
+      : `${s}: in sync (${v.in_step} setting(s) verified unchanged)`);
+    alert(`${name} read back:\n\n${lines.join('\n')}\n\nRead-only — nothing was written.`);
+  } catch (e) { alert(e.message); }
+  page_settings();
 }
 
 function pushTargetModal(name) {
