@@ -27,6 +27,7 @@ import urllib.request
 from urllib.parse import urlsplit
 from flask import Blueprint, jsonify, request
 
+from . import netutil
 from .core import db
 from .core.auth import actor
 from .core.runcmd import err
@@ -92,10 +93,103 @@ def build_hosts():
     return records
 
 
+def _tag_for(net, used):
+    """A dnsmasq tag naming this network's scope. Tags are what tie options to
+    a range, so the only hard requirement is that they are unique and
+    consistent WITHIN one payload — ranges and their options are always
+    rendered together, so a tag changing between pushes is harmless."""
+    base = re.sub(r'[^A-Za-z0-9_-]', '-', (net.get('name') or '').strip().lower())
+    base = base.strip('-')[:32] or 'net%d' % net['id']
+    tag = base
+    if tag in used:                       # two networks named the same
+        tag = ('%s-%d' % (base[:26], net['id']))[:32]
+    used.add(tag)
+    return tag
+
+
+def build_dhcp():
+    """The `dhcp` section payload: scopes, the options each hands out, and
+    reservations — in DNSMAQ-MGR's own store shapes, exactly as build_hosts()
+    emits its host records. Adapters for other servers translate from here.
+
+    Options come from two places on purpose. Router, DNS and domain are read
+    off the network row (they are the address plan's own L3 facts, and are
+    refused as dhcp_options rows precisely so there is one copy); everything
+    else — NTP, PXE, WPAD, arbitrary codes — comes from dhcp_options.
+    """
+    nets = {n['id']: n for n in db.query('SELECT * FROM networks')}
+    rows = db.query('SELECT * FROM dhcp_ranges ORDER BY start_hex, id')
+    opt_rows = db.query('SELECT * FROM dhcp_options WHERE enabled=1 '
+                        'ORDER BY network_id, option')
+    by_net = {}
+    for o in opt_rows:
+        by_net.setdefault(o['network_id'], []).append(o)
+
+    ranges, options, used, tagged = [], [], set(), {}
+    for r in rows:
+        net = nets.get(r['network_id'])
+        if not net or net['version'] != 4:
+            continue                      # dnsmasq static DHCP here is IPv4
+        prefix = netutil.parse_network(net['cidr'])
+        if prefix is None:
+            continue
+        if net['id'] not in tagged:
+            tagged[net['id']] = _tag_for(net, used)
+        tag = tagged[net['id']]
+        ranges.append({'start': r['start_addr'], 'end': r['end_addr'],
+                       'netmask': str(prefix.netmask),
+                       'lease': r['lease_time'] or '12h',
+                       'tag': tag, 'enabled': bool(r['enabled']),
+                       'comment': r['name'] or r['description'] or ''})
+
+    for nid, tag in tagged.items():
+        net = nets[nid]
+        # dnsmasq answers option 3 with ITSELF unless told otherwise, and the
+        # DHCP server is very often not the gateway. Always state it.
+        if net.get('gateway'):
+            options.append({'tag': tag, 'option': 'option:router',
+                            'value': net['gateway']})
+        dns = netutil.split_list(net.get('dns_servers'))
+        if not dns and net.get('gateway'):
+            # No DNS recorded: hand out the gateway, which is what a gateway-
+            # served scope does today. Silently letting dnsmasq answer with
+            # itself would repoint every client on the segment.
+            dns = [net['gateway']]
+        if dns:
+            options.append({'tag': tag, 'option': 'option:dns-server',
+                            'value': ','.join(dns)})
+        if net.get('domain'):
+            options.append({'tag': tag, 'option': 'option:domain-name',
+                            'value': net['domain']})
+        for o in by_net.get(nid, []):
+            options.append({'tag': tag, 'option': o['option'], 'value': o['value']})
+
+    # Same rule as the long-standing static-lease export: a reservation needs
+    # a MAC to mean anything, and dnsmasq's dhcp-host is IPv4 here.
+    leases = []
+    for rec in db.query(
+            "SELECT address, dns_name, mac FROM ip_addresses "
+            "WHERE mac <> '' AND version = 4 AND status IN ('active','reserved') "
+            "ORDER BY addr_hex"):
+        leases.append({'mac': rec['mac'], 'ip': rec['address'],
+                       'hostname': rec['dns_name'].split('.')[0] if rec['dns_name'] else ''})
+
+    return {'ranges': ranges, 'static_leases': leases, 'options': options}
+
+
 # A section exists once something can render it. Declaring the name before the
 # renderer lands would let a target subscribe to a section that silently
 # pushes nothing, so the registry IS the list of valid sections.
-SECTION_BUILDERS = {'hosts': build_hosts}
+SECTION_BUILDERS = {'hosts': build_hosts, 'dhcp': build_dhcp}
+
+
+def section_size(payload):
+    """How many records a section carries. `hosts` is a flat list; `dhcp` is
+    several lists under one object, and reporting "3" for its three keys would
+    be worse than useless in a push summary."""
+    if isinstance(payload, dict):
+        return sum(len(v) for v in payload.values() if isinstance(v, list))
+    return len(payload)
 
 
 def sections_available():
@@ -276,7 +370,7 @@ def push_target(target, data, serials):
 
 @bp.route('/api/push')
 def push_status():
-    counts = {s: len(b()) for s, b in SECTION_BUILDERS.items()}
+    counts = {s: section_size(b()) for s, b in SECTION_BUILDERS.items()}
     return jsonify({'targets': [_public(t) for t in _targets()],
                     'sections': list(sections_available()),
                     'serials': _serials(),
@@ -461,7 +555,7 @@ def run_push(only='', sections=None):
             t['serial'] = max(held.values())
         results.append({'name': t['name'], 'ok': ok, 'detail': detail,
                         'sections': subs})
-    counts = {s: len(data[s]) for s in live}
+    counts = {s: section_size(data[s]) for s in live}
     with db.WRITE_LOCK:
         _save_targets(targets)
         db.audit(actor(), 'push-run', 'push', None,

@@ -1368,6 +1368,107 @@ def test_v3_database_upgrades_in_place(tmp_path, monkeypatch):
     dbmod._local.conn = None
 
 
+# ─── dhcp section renderer ────────────────────────────────────────────
+
+def _scope(client, cidr, start, end, **net):
+    nid = mknet(client, cidr, **net)
+    r = client.post('/api/dhcp/ranges', json={'network_id': nid, 'start_addr': start,
+                                              'end_addr': end, 'lease_time': '24h'})
+    assert r.status_code == 200, r.json
+    return nid
+
+
+def test_build_dhcp_always_states_the_router_explicitly(client):
+    """dnsmasq answers option 3 with ITSELF when it is not told otherwise, and
+    the DHCP server is usually not the gateway. Every scope must carry it."""
+    from nexusipam import pushout
+    _scope(client, '10.80.0.0/24', '10.80.0.100', '10.80.0.200',
+           name='lan', gateway='10.80.0.1', dns_servers='10.80.0.53, 1.1.1.1',
+           domain='lab.lan')
+    out = pushout.build_dhcp()
+    assert len(out['ranges']) == 1
+    rng = out['ranges'][0]
+    assert (rng['start'], rng['end'], rng['netmask'], rng['lease']) == \
+        ('10.80.0.100', '10.80.0.200', '255.255.255.0', '24h')
+    opts = {o['option']: o['value'] for o in out['options']}
+    assert opts['option:router'] == '10.80.0.1'
+    assert opts['option:dns-server'] == '10.80.0.53,1.1.1.1'
+    assert opts['option:domain-name'] == 'lab.lan'
+    # Options are tied to their range by tag, or dnsmasq applies them globally.
+    assert {o['tag'] for o in out['options']} == {rng['tag']} == {'lan'}
+
+
+def test_build_dhcp_falls_back_to_the_gateway_for_dns(client):
+    """A gateway-served scope with no DNS recorded hands out the gateway.
+    Emitting nothing would let dnsmasq answer with itself and repoint every
+    client on the segment."""
+    from nexusipam import pushout
+    _scope(client, '10.81.0.0/24', '10.81.0.10', '10.81.0.20',
+           name='guest', gateway='10.81.0.1')
+    opts = {o['option']: o['value'] for o in pushout.build_dhcp()['options']}
+    assert opts['option:dns-server'] == '10.81.0.1'
+
+
+def test_build_dhcp_carries_extra_options_and_reservations(client):
+    from nexusipam import pushout
+    nid = _scope(client, '10.82.0.0/24', '10.82.0.100', '10.82.0.200',
+                 name='pxe-net', gateway='10.82.0.1')
+    client.post('/api/dhcp/options', json={'network_id': nid,
+                                           'option': 'option:ntp-server',
+                                           'value': '10.82.0.5'})
+    client.post('/api/dhcp/options', json={'network_id': nid, 'option': '66',
+                                           'value': '10.82.0.236'})
+    client.post('/api/dhcp/options', json={'network_id': nid, 'option': '67',
+                                           'value': 'netboot.xyz.kpxe',
+                                           'enabled': False})
+    _mk_addr(client, '10.82.0.9', mac='aa:bb:cc:dd:ee:01', dns_name='pxe.lab.lan',
+             status='reserved')
+    out = pushout.build_dhcp()
+    opts = {o['option']: o['value'] for o in out['options']}
+    assert opts['option:ntp-server'] == '10.82.0.5' and opts['66'] == '10.82.0.236'
+    assert '67' not in opts                      # disabled options are not sent
+    assert out['static_leases'] == [
+        {'mac': 'aa:bb:cc:dd:ee:01', 'ip': '10.82.0.9', 'hostname': 'pxe'}]
+
+
+def test_build_dhcp_keeps_a_disabled_scope_but_marks_it_disabled(client):
+    """A documented-but-not-serving scope still consumes address space, and a
+    staged cutover enables ranges one at a time — so it must survive the
+    render rather than vanish from it."""
+    from nexusipam import pushout
+    nid = _scope(client, '10.83.0.0/24', '10.83.0.10', '10.83.0.20', name='dmz',
+                 gateway='10.83.0.1')
+    rid = client.get('/api/dhcp/ranges').get_json()['dhcp_ranges'][0]['id']
+    assert client.post('/api/dhcp/ranges/%d' % rid, json={'enabled': False}
+                       ).status_code == 200
+    out = pushout.build_dhcp()
+    assert len(out['ranges']) == 1 and out['ranges'][0]['enabled'] is False
+    assert nid
+
+
+def test_build_dhcp_tags_are_unique_per_network(client):
+    from nexusipam import pushout
+    _scope(client, '10.84.0.0/24', '10.84.0.10', '10.84.0.20', name='same',
+           gateway='10.84.0.1')
+    _scope(client, '10.85.0.0/24', '10.85.0.10', '10.85.0.20', name='same',
+           gateway='10.85.0.1')
+    tags = {r['tag'] for r in pushout.build_dhcp()['ranges']}
+    assert len(tags) == 2, tags       # options would cross-apply otherwise
+
+
+def test_push_counts_report_records_not_section_keys(client, monkeypatch):
+    from nexusipam import pushout
+    _scope(client, '10.86.0.0/24', '10.86.0.10', '10.86.0.20', name='n',
+           gateway='10.86.0.1')
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x',
+                      'sections': ['dhcp']})
+    monkeypatch.setattr(pushout, 'push_target', lambda t, data, serials: (True, 'ok'))
+    r = client.post('/api/push/run?sections=dhcp').json
+    # 1 range + 2 options (router, dns fallback) — not 3 for the three keys.
+    assert r['counts']['dhcp'] == 3
+
+
 # ─── Multi-section push ───────────────────────────────────────────────
 
 def _fake_section(monkeypatch, name, payload):
