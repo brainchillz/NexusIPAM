@@ -16,18 +16,68 @@ the tools to check it against **what is actually true** on the wire:
 4. **reconcile** — find hosts answering pings that nobody recorded, and records
    for machines that no longer answer.
 
-It can also **make** the plan true, rather than only describing it, in two
-sections: `hosts` (each address carries an ordered list of DNS names, rendered
-and pushed to the servers that answer queries — DNSMAQ-MGR nodes, or a UniFi
-gateway's Static DNS) and `dhcp` (scopes, the options they hand out, and
-MAC→address reservations, pushed the same way). Provisioning a host becomes
-one call that allocates an address, names it, optionally reserves it, and
-publishes everywhere; deprovisioning removes all of it. Every target is pushed
-independently, and the servers keep serving from local state, so Nexus IPAM
-being down never affects name resolution or leasing.
+It can also **make** the plan true, rather than only describing it: the plan
+renders into sections — `hosts` (every address's ordered DNS names), `dhcp`
+(scopes, options, MAC→address reservations) and `netboot` (PXE) — and pushes
+them to the servers that enforce them: **DNSMAQ-MGR** nodes, a **UniFi
+gateway**, a **Pi-hole**, or a **Technitium DNS Server**, in any mix.
+Provisioning a host becomes one call that allocates an address, names it,
+optionally reserves it, and publishes everywhere; deprovisioning removes all
+of it. Every target is pushed independently, and the servers keep serving
+from local state, so Nexus IPAM being down never affects name resolution or
+leasing.
 
 Push is entirely optional — configure no targets and it stays a pure record of
 your address plan.
+
+---
+
+## DDI: one plan, four enforcement backends
+
+DDI — DNS, DHCP and IPAM as one system — usually means buying one appliance.
+Here it means one **system of record** (this app) and interchangeable
+**enforcement backends**: the plan is rendered exactly once per section, and
+a per-kind adapter translates it into whatever each server natively speaks.
+No backend ever sees different content from another; a name edited once is
+live on every DNS server in one push, a reservation recorded once reaches
+whatever serves DHCP.
+
+Three rules hold across every backend:
+
+1. **Single writer, push-based, no runtime coupling.** IPAM authors, the
+   servers enforce from local state. A DNSMAQ-MGR node locks each pushed
+   section read-only (drift is impossible there); the reconciled kinds stay
+   editable, so each gets a read-only **drift check** — the target read back
+   and diffed with the exact planners the push executes.
+2. **Inexpressible means reported, never dropped.** Each backend has real
+   limits (see the matrix). Anything the plan states that a backend cannot
+   serve is surfaced as a conflict or a skipped count in the push result —
+   because a silently ignored option is indistinguishable from a satisfied
+   one.
+3. **Nothing destructive without an opt-in.** Every kind defaults additive:
+   deleting entries the plan doesn't list, withdrawing reservations, and
+   touching a DHCP server's on/off state each sit behind their own
+   blunt-labelled flag — and a scope this app creates always starts off.
+
+| | DNSMAQ-MGR | UniFi gateway | Pi-hole (v6) | Technitium |
+|---|---|---|---|---|
+| Model | mirror push, section locks on node | reconcile | reconcile | reconcile |
+| DNS records | full host store, byte-for-byte | Static DNS (A/AAAA) | `dns.hosts` lines | authoritative zones, ours comment-tagged |
+| PTR / reverse | implicit — record order | — | implicit — line order | explicit per-/24 reverse zones (opt-in) |
+| DHCP scopes | all of them | all its networks | **one** — its own subnet | all of them |
+| Scope options | everything (native spelling) | router, DNS, domain, NTP, PXE, WPAD | router only | router, DNS, domain, NTP, PXE |
+| Reservations | subnet-wide | per-client bindings | subnet-wide | **inside the scope range only** |
+| PXE | own `netboot` section | `dhcpd_boot_*` | — | `serverAddress` + `bootFileName` |
+| Drift check | not needed (locked) | ✓ | ✓ | ✓ |
+| Leases → overlay | with a read token | ✓ | ✓ | ✓ |
+| Adopt existing state | with a read token | ✓ | not yet | not yet |
+| Auth | mirror token (write-only) + optional read token | local admin | web/app password | permanent API token |
+
+Freshness is answerable per target and per section: serials are
+**content-versioned** (they advance only when a section's rendered payload
+changes), so the panel can say current / behind / never for every cell of
+target × section — and the drift column answers the question serials cannot:
+does the target still *hold* what it acked?
 
 ---
 
@@ -573,7 +623,9 @@ names fully qualified if you push, and the two paths agree.
 Exports are pull. The other direction is push: Nexus IPAM renders the address
 plan and delivers it to the systems that enforce it, which is what makes it
 the author rather than a mirror. Configure targets in Settings → Push targets,
-or drive them with `/api/push/*`.
+or drive them with `/api/push/*`. (The capability matrix in the **DDI**
+section near the top summarises what each kind can and cannot express; this
+section is the per-kind detail.)
 
 Push is **section-based** — a target subscribes to what it should receive:
 
