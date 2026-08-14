@@ -16,13 +16,15 @@ the tools to check it against **what is actually true** on the wire:
 4. **reconcile** — find hosts answering pings that nobody recorded, and records
    for machines that no longer answer.
 
-It can also **make** the plan true, rather than only describing it: each
-address carries an ordered list of DNS names, and Nexus IPAM renders those and
-pushes them to the servers that answer queries — DNSMAQ-MGR nodes, or a UniFi
-gateway's Static DNS. Provisioning a host becomes one call that allocates an
-address, names it, and publishes it everywhere; deprovisioning removes all
-three. Every target is pushed independently, and the servers keep serving from
-local state, so Nexus IPAM being down never affects name resolution.
+It can also **make** the plan true, rather than only describing it, in two
+sections: `hosts` (each address carries an ordered list of DNS names, rendered
+and pushed to the servers that answer queries — DNSMAQ-MGR nodes, or a UniFi
+gateway's Static DNS) and `dhcp` (scopes, the options they hand out, and
+MAC→address reservations, pushed the same way). Provisioning a host becomes
+one call that allocates an address, names it, optionally reserves it, and
+publishes everywhere; deprovisioning removes all of it. Every target is pushed
+independently, and the servers keep serving from local state, so Nexus IPAM
+being down never affects name resolution or leasing.
 
 Push is entirely optional — configure no targets and it stays a pure record of
 your address plan.
@@ -96,6 +98,11 @@ chance of a stale tree.
   addresses stay out of allocation, which is the point of having them.
 - Assigned generically to a **device, VM, container or cluster**, with an
   optional interface name, MAC, DNS name and "is primary" flag.
+- A separate **DHCP reservation** flag — deliberately not a status, because a
+  reservation says how an address is *delivered* while status says what it is
+  *for*, and a live host with a fixed lease is legitimately both `active` and
+  reserved. The flag (plus the MAC) is what publishes the binding in the
+  `dhcp` push section.
 - **Visual IP map** — one cell per address in a subnet, coloured by state,
   with the gateway flagged; click any cell to see everything known about it.
 - Bulk import (paste `IP hostname MAC` lines), CSV export, bulk span
@@ -134,6 +141,9 @@ The two operations that actually change the world, each one action:
 
 Provision refuses a name that already resolves somewhere else rather than
 silently creating round-robin, so a typo fails loudly instead of quietly.
+With a MAC and `is_reservation: true` it also publishes the DHCP reservation
+in the same action; deprovision (including `keep`) withdraws it — a parked
+address must not keep its MAC binding live on the DHCP server.
 
 ### Free-space and ping verification
 - Free list per network, excluding records, DHCP pools and the gateway.
@@ -147,11 +157,17 @@ silently creating round-robin, so a typo fails loudly instead of quietly.
   kernel neighbour table.
 
 ### Reconciliation
-Two lists that tell you where the plan and reality disagree:
+Lists that tell you where the plan and reality disagree:
 - **Unmanaged hosts** — answered a ping, no record exists. One click adopts
   them into the address plan with their discovered hostname and MAC.
 - **Silent records** — recorded active, did not answer. Powered off,
   firewalled, or a ghost record to delete.
+- **Lease overlay** — dynamic leases read straight from the DHCP server:
+  observed, never written into the plan (a lease stops being true with nobody
+  touching it), aged out on its own, and refreshed on a schedule. Where a
+  ping sweep infers, this is the server's own ledger — and it is the only
+  view that can say a reservation is being ignored: the address answered for
+  a *different* MAC than the one it is reserved for.
 
 ### Inventory
 The containment chain a real lab actually has:
@@ -190,7 +206,25 @@ is to account for the address space a pool consumes no matter what serves it.
   a server's own DNSMAQ-MGR instance is one click away.
 - DHCP ranges tied to a network, overlap-checked against each other and
   bounds-checked against the network.
+- **DHCP options** per network, stored in dnsmasq's spelling
+  (`option:ntp-server`, or a bare code) because it is the more expressive
+  form — every renderer translates from it. Router, DNS and domain are
+  deliberately **refused** as options: they already live on the network row,
+  drive allocation and the deploy payload, and a second copy would drift.
 - DNS servers with role (authoritative / recursive / forwarder) and zones.
+
+### DHCP-side names
+A host with a reservation usually already has a name — the gateway's own DNS
+resolves it, and the plan knows nothing about it. Three sources per client,
+three levels of trust: a **Local DNS Record** (an FQDN someone chose, already
+served — adopting one is a handover, the next push takes it over), the
+client's human **label** (not DNS-safe — proposed, never mangled into shape),
+and the **option-12 hostname** the device claimed for itself (a device can
+claim to be `ns1`, hence lowest trust and always collision-checked). The DNS
+page lists them as candidates; adoption is explicit, per address, lands as an
+alias unless the address has no names (position 0 and the PTR never move
+silently), and lease-derived names are shown but never adopted — a dynamic
+name published into authoritative DNS goes stale with nobody touching it.
 
 ### Health checks
 Flags real data problems, not style opinions: addresses outside every defined
@@ -277,6 +311,7 @@ Everything is a `NEXUSIPAM_*` environment variable:
 | `NEXUSIPAM_MAX_ENUMERATE` | `65536` | Largest prefix the UI will draw an address map for |
 | `NEXUSIPAM_BACKUP_HOURS` | `24` | Automatic JSON backups to `$DATA_DIR/backups/` (`0` disables) |
 | `NEXUSIPAM_BACKUP_KEEP` | `14` | Backups retained |
+| `NEXUSIPAM_LEASE_MINUTES` | `60` | Background lease-overlay refresh from every gateway push target (`0` disables — the overlay then only moves when refreshed by hand) |
 | `NEXUSIPAM_AUDIT_DAYS` | `365` | Audit entries older than this are pruned daily (`0` keeps forever) |
 
 ### CLI
@@ -410,19 +445,36 @@ the first entry is canonical. Entries may be bare strings or objects:
 ]}
 ```
 
-### Pushing DNS
+### Pushing
 
 ```
-GET    /api/push                 targets, serial, what would be published
-GET    /api/push/preview         the exact payload, without sending it
-POST   /api/push/run             push every enabled target (+ ?target=<name>)
+GET    /api/push                 targets, per-section serials, record counts
+GET    /api/push/preview         the exact payload, unsent (+ ?sections=dhcp)
+POST   /api/push/run             push every enabled target
+                                 (+ ?target=<name> &sections=hosts,dhcp)
 POST   /api/push/targets         create or update a target
 DELETE /api/push/targets/<name>  stop pushing there (the node keeps what it has)
+POST   /api/push/targets/<name>/pull    adopt a gateway's DHCP state into the
+                                        plan (+ ?dry_run=1 to preview, read-only)
+POST   /api/push/targets/<name>/leases  refresh the lease overlay from a gateway
+POST   /api/push/targets/<name>/drift   read a gateway back and diff it against
+                                        the plan — read-only (unifi targets only;
+                                        a DNSMAQ-MGR node locks pushed sections,
+                                        so it cannot drift)
+GET    /api/names/candidates     DHCP-side names the plan does not publish
+POST   /api/names/adopt          {"addresses": [...]} — adopt them, explicitly
 ```
 
 A target update is partial in the same way resources are: omit `token` or
 `unifi_password` and the stored secret is kept, so changing one flag never
 means re-entering a credential.
+
+**Serials version content, not pushes.** Each section carries its own counter,
+advanced only when that section's rendered payload actually changes — so a
+target's held serial answers "does it have the current content?", and pushing
+one target never makes the others read as stale. Re-sending an equal serial
+re-applies idempotently (receivers reject only strictly lower ones), which is
+also what a forced re-push after suspected drift wants.
 
 ### Update semantics — partial and safe
 
@@ -516,31 +568,46 @@ Bare hostnames are qualified with their network's domain on the way out.
 the ordered name list is meant to round-trip a zone byte-for-byte. Record
 names fully qualified if you push, and the two paths agree.
 
-### DNS push targets
+### Push targets
 
 Exports are pull. The other direction is push: Nexus IPAM renders the address
-plan's names and delivers them to the systems that answer queries, which is
-what makes it the author of DNS rather than a mirror of it. Configure targets
-in Settings → DNS push targets, or drive them with `/api/push/*`.
+plan and delivers it to the systems that enforce it, which is what makes it
+the author rather than a mirror. Configure targets in Settings → Push targets,
+or drive them with `/api/push/*`.
+
+Push is **section-based** — a target subscribes to what it should receive:
+
+- **`hosts`** — one dnsmasq host record per enabled name, addresses in stable
+  order, canonical name first (that ordering drives the PTR answer).
+- **`dhcp`** — scopes (ranges with lease times), the options each hands out,
+  and every MAC→address reservation. Router, DNS and domain come off the
+  network rows; everything else from the per-network options. A scope with no
+  DNS recorded hands out its gateway — matching what a gateway-served scope
+  does, instead of letting dnsmasq silently answer with itself. Disabled
+  ranges render as disabled rather than vanishing: they still consume space.
 
 Two kinds of target:
 
-- **DNSMAQ-MGR node** — receives the `hosts` section on its own
+- **DNSMAQ-MGR node** — receives its sections on its own
   `POST /api/mirror/receive`. The node re-validates every record, gates the
-  swap with `dnsmasq --test`, and locks that section read-only in its UI, so
-  there is exactly one writer. Authenticated with a per-node mirror token.
-- **UniFi Cloud Gateway** — has no mirror endpoint, so its Static DNS is
-  reconciled directly against the same records (create / update / delete,
-  A and AAAA only; CNAME, TXT and the rest are left alone). Authenticated as a
-  local gateway admin with MFA disabled, since the API refuses a 2FA login.
+  swap with `dnsmasq --test`, and locks each pushed section read-only in its
+  UI, so there is exactly one writer. Authenticated with a per-node mirror
+  token.
+- **UniFi Cloud Gateway** — has no mirror endpoint, so it is reconciled
+  object by object: Static DNS against the `hosts` records (A/AAAA only;
+  CNAME, TXT and the rest are left alone), and for `dhcp` the `dhcpd_*`
+  fields on its network objects plus fixed-IP client bindings. Authenticated
+  as a local gateway admin with MFA disabled, since the API refuses a 2FA
+  login.
 
-Every target is pushed **independently**, carrying one monotonic serial per
-run — no target's freshness depends on another being reachable, and a node
-that rejects a stale serial is protected from replay and reordering. TLS is
-either `insecure` or pinned to a certificate fingerprint, which is the useful
-pair for self-signed appliances.
+Every target is pushed **independently**, carrying one content-versioned
+serial per section — no target's freshness depends on another being
+reachable, and a node that rejects a stale serial is protected from replay
+and reordering. TLS is either `insecure` or pinned to a certificate
+fingerprint, which is the useful pair for self-signed appliances (pin
+anything that carries a credential).
 
-Two UniFi behaviours are worth knowing before enabling that kind:
+UniFi behaviours worth knowing before enabling that kind:
 
 - Gateways keep a *second* DNS store — a per-client "Local DNS Record" on
   fixed-IP clients — which shadows Static DNS and makes the gateway refuse a
@@ -551,6 +618,32 @@ Two UniFi behaviours are worth knowing before enabling that kind:
 - *Delete Static DNS entries this IPAM did not create* is **off** by default,
   so a first sync only adds and updates. Turning it on makes Nexus IPAM
   authoritative over the gateway's whole A/AAAA table.
+- DHCP writes **merge** into the network object as fetched — it also carries
+  VLAN, purpose, IGMP and IPv6 settings this app does not model, and a PUT
+  built from our fields alone would blank them. Withdrawing a reservation
+  unsets `use_fixedip`, never deletes the client (which is also the device's
+  identity and history). Options with no UniFi equivalent are **reported as
+  conflicts**, never dropped — a silently ignored option is indistinguishable
+  from a satisfied one.
+- Two further flags, both **off** by default and both with a large blast
+  radius: *Withdraw DHCP reservations the plan does not list* (machines
+  relying on them lose their addresses at renewal) and *Manage scope on/off
+  state* (a range disabled in the plan can turn a VLAN's DHCP server off —
+  an outage, not a config tweak).
+
+**Adoption** is how a populated gateway becomes manageable: *Adopt…* on a
+gateway target (or `POST .../pull`) reads its networks, scopes, options and
+reservations into the plan — after a read-only dry-run preview. It fills gaps
+and never overwrites: values already recorded here win and are reported as
+`kept`, and a scope that overlaps a recorded range is refused rather than
+added alongside. You cannot become the writer of something you have never
+read.
+
+**Drift** closes the loop from the other side: serials say a target *acked*
+the current content, a drift check says whether it still *holds* it. The
+gateway is read back and diffed with the same planners the push executes —
+computed writes, performed nowhere — because its UI stays editable after a
+push. A DNSMAQ-MGR node needs no check: its pushed sections are locked.
 
 ### VC-Deployer
 
@@ -678,15 +771,17 @@ nexusipam/
   core/runcmd.py        shell-free command execution
   core/tls.py           self-signed generation, cert upload
   netutil.py            prefix maths, hex bounds, usable-range rules
-  resource.py           generic REST machinery (one implementation, ten tables)
+  resource.py           generic REST machinery (one implementation, eleven tables)
   networks.py           VLANs, networks, containment, utilization
   addresses.py          address records, search, lookup, ordered names
   allocate.py           free-space discovery, atomic allocation
   inventory.py          clusters, devices, VMs, containers, topology
-  services.py           DHCP/DNS servers, DHCP ranges
+  services.py           DHCP/DNS servers, DHCP ranges, DHCP options
   scan.py               ICMP prober, scan jobs, reconciliation
-  pushout.py            DNS push targets, render + deliver, serials
-  unifi.py              UniFi gateway Static DNS adapter (vendored)
+  pushout.py            push targets, section renderers, serials, drift
+  unifi.py              UniFi gateway adapter: Static DNS + DHCP (vendored core)
+  adopt.py              pull a target's state into the plan; name candidates
+  leases.py             dynamic lease overlay + scheduled refresh
   provision.py          one-action provision / deprovision
   exports.py            exports, import, change feed, audit
   sync.py               which source owns what; importer run reports
