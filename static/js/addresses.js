@@ -12,6 +12,10 @@ const ADDRESS_FIELDS = [
   {name: 'dns_name', label: 'DNS name', placeholder: 'web01 or web01.lab.lan'},
   {name: 'if_name', label: 'Interface', placeholder: 'eth0'},
   {name: 'mac', label: 'MAC address', placeholder: 'aa:bb:cc:dd:ee:ff'},
+  {name: 'is_reservation', label: 'DHCP reservation — a server hands this address to this MAC', type: 'checkbox',
+   help: 'Independent of Status: a reservation says how the address is delivered, status says what ' +
+         'it is for, and a live host with a fixed lease is both active and reserved. This flag ' +
+         '(plus the MAC) is what publishes the binding in the dhcp push section.'},
   {name: 'is_primary', label: 'Primary address for this object', type: 'checkbox'},
   {name: 'description', label: 'Description'},
 ];
@@ -22,7 +26,8 @@ function addressColumns(opts) {
   opts = opts || {};
   const cols = [
     {label: 'Address', sortKey: 'addr_hex', get: a => `<a class="cidr" onclick="addressPeek('${jsArg(a.address)}')">${escapeHtml(a.address)}</a>`},
-    {label: 'Status', sortKey: 'status', get: a => statusBadge(a.status)},
+    {label: 'Status', sortKey: 'status', get: a =>
+      statusBadge(a.status) + (a.is_reservation ? ' ' + typeBadge('reservation') : '')},
     {label: 'DNS name', sortKey: 'dns_name', get: a => escapeHtml(a.dns_name || '') || '<span class="muted">—</span>'},
     {label: 'Assigned to', sortKey: 'assigned_name', get: a => a.assigned_kind
       ? objLink(a.assigned_kind, a.assigned_id, a.assigned_name) + ' ' + typeBadge(a.assigned_kind)

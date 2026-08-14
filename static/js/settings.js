@@ -29,10 +29,11 @@ async function page_settings() {
     API.get('/api/sync').catch(() => null),
     API.get('/api/push').catch(() => null),
   ]);
-  // The add-target modal is opened from an onclick and has no access to the
-  // response, so stash what it needs. Sections come from the server rather
+  // The target modals are opened from onclicks and have no access to the
+  // response, so stash what they need. Sections come from the server rather
   // than a hardcoded list: a section exists once something can render it.
   pushSections = (push && push.sections) || ['hosts'];
+  pushTargets = (push && push.targets) || [];
 
   $('page-content').innerHTML = `
     <div class="page-header"><h2>Settings</h2></div>
@@ -66,17 +67,18 @@ async function page_settings() {
     ], sync.runs.slice(0, 10), '')}` : ''}` : ''}
 
     ${push ? `
-    <h3 style="margin-top:24px">DNS push targets</h3>
-    <p class="help">Pushes the address plan's names to DNSMAQ-MGR nodes via their mirror-receive
-      endpoint — the pushed section locks read-only on the node, making this IPAM the single writer.
-      A UniFi gateway is pushed too, by reconciling its Static DNS directly. Every target is
-      pushed independently, so none goes stale because another is down.
-      Currently <strong>${push.record_count}</strong> host record(s) across ${push.address_count} address(es)
-      would be pushed (serial ${push.serial}).</p>
+    <h3 style="margin-top:24px">Push targets</h3>
+    <p class="help">Pushes the address plan to its enforcement points, one section at a time:
+      <code>hosts</code> (DNS records) and <code>dhcp</code> (scopes, options, reservations).
+      DNSMAQ-MGR nodes receive a mirror payload and lock the pushed section read-only; a UniFi
+      gateway is reconciled object by object. Every target is pushed independently, so none goes
+      stale because another is down. Each section carries its own serial:
+      ${pushSectionSummary(push)}.</p>
     <div class="toolbar">
       <button class="btn btn-sm" onclick="pushTargetModal()">+ Add target</button>
-      ${(push.targets || []).length ? `<button class="btn btn-sm" onclick="pushRunNow(this)">Push now</button>
-      <a class="btn btn-sm btn-outline" href="/api/push/preview" target="_blank">Preview payload</a>` : ''}
+      ${(push.targets || []).length ? `<button class="btn btn-sm" onclick="pushRunNow(this)">Push now</button>` : ''}
+      ${(push.sections || []).map(s => `<a class="btn btn-sm btn-outline"
+        href="/api/push/preview?sections=${encodeURIComponent(s)}" target="_blank">Preview ${escapeHtml(s)}</a>`).join('')}
     </div>
     ${dataTable([
       {label: 'Target', get: t => `<strong>${escapeHtml(t.name)}</strong><br><span class="muted">${escapeHtml(t.url || '')}</span>`},
@@ -84,15 +86,18 @@ async function page_settings() {
         ? `<span class="status-badge">UniFi gateway</span>${t.unifi_delete_extra
              ? '<br><span class="muted">authoritative</span>' : '<br><span class="muted">additive</span>'}`
         : '<span class="status-badge">DNSMAQ-MGR</span>'}`},
-      {label: 'Sections', get: t => (t.sections || []).map(s =>
-        `<span class="status-badge">${escapeHtml(s)}</span>`).join(' ') || '<span class="muted">none</span>'},
+      {label: 'Sections held', get: t => sectionBadges(t, push)},
       {label: 'Enabled', get: t => t.enabled ? '<span class="status-badge green">yes</span>' : '<span class="status-badge gray">no</span>'},
       {label: 'Last push', get: t => t.last
         ? `${t.last.ok ? '<span class="status-badge green">ok</span>' : '<span class="status-badge red">FAILED</span>'}
-           <span class="muted">${fmtTs(t.last.ts)} · serial ${t.last.serial} · ${escapeHtml(t.last.detail || '')}</span>`
+           <span class="muted">${fmtTs(t.last.ts)} · ${escapeHtml(lastSerials(t.last))} · ${escapeHtml(t.last.detail || '')}</span>`
         : '<span class="muted">never</span>'},
       {label: '', cls: 'row-actions', get: t => `
         <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
+        <button class="btn btn-sm btn-outline" onclick="pushTargetModal('${jsArg(t.name)}')">Edit</button>
+        ${t.kind === 'unifi' ? `<button class="btn btn-sm btn-outline"
+          title="Read this gateway's networks, DHCP scopes, options and reservations into the plan"
+          onclick="pullTargetModal('${jsArg(t.name)}')">Adopt…</button>` : ''}
         <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}','${jsArg(t.kind || 'dnsmaq')}')">Remove</button>`},
     ], push.targets || [], 'No push targets — this IPAM is not yet writing DNS anywhere')}` : ''}
 
@@ -386,49 +391,123 @@ async function showAudit() {
 
 // ─── Push targets ───────────────────────────────────────
 let pushSections = ['hosts'];
+let pushTargets = [];
 
-function pushTargetModal() {
-  openModal('Add DNS push target', `
+// Per-section serial summary for the panel header, e.g.
+// "hosts: 61 record(s), serial 14 · dhcp: 12 record(s), serial 3".
+// Targets stored before per-section serials existed only carry the legacy
+// scalar, so it is the fallback everywhere a per-section number is missing.
+function pushSectionSummary(push) {
+  const serials = push.serials || {};
+  return (push.sections || []).map(s => {
+    const serial = serials[s] != null ? serials[s] : push.serial;
+    const extra = s === 'hosts' ? ` across ${push.address_count} address(es)` : '';
+    return `<strong>${escapeHtml(s)}</strong>: ${fmtNum((push.counts || {})[s])} record(s)${extra}, serial ${serial}`;
+  }).join(' · ');
+}
+
+// One badge per subscribed section: the serial this target holds, coloured by
+// whether that is the current one — the at-a-glance answer to "is this target
+// current for DHCP?".
+function sectionBadges(t, push) {
+  const current = push.serials || {};
+  const held = t.serials || (t.serial ? {hosts: t.serial} : {});
+  const out = (t.sections || []).map(s => {
+    const h = held[s];
+    if (h == null) {
+      return `<span class="status-badge gray" title="This target has never received ${escapeHtml(s)}">${escapeHtml(s)} · never</span>`;
+    }
+    if (current[s] != null && h < current[s]) {
+      return `<span class="status-badge yellow" title="Holds serial ${h}; the current ${escapeHtml(s)} serial is ${current[s]} — push to catch it up">${escapeHtml(s)} · ${h} (behind, now ${current[s]})</span>`;
+    }
+    return `<span class="status-badge green" title="Holds the current ${escapeHtml(s)} serial">${escapeHtml(s)} · ${h}</span>`;
+  });
+  return out.join(' ') || '<span class="muted">none</span>';
+}
+
+function lastSerials(last) {
+  if (last.serials) {
+    return Object.entries(last.serials).map(([s, n]) => `${s} ${n}`).join(' · ');
+  }
+  return 'serial ' + last.serial;
+}
+
+function pushTargetModal(name) {
+  const cur = name ? pushTargets.find(t => t.name === name) : null;
+  const kind = (cur && cur.kind) || 'dnsmaq';
+  const subs = cur ? (cur.sections || []) : ['hosts'];
+  openModal(cur ? 'Edit push target' : 'Add push target', `
     <div class="form-group"><label>Type</label>
-      <select id="pt-kind" class="form-control" onchange="pushTargetKind()">
-        <option value="dnsmaq">DNSMAQ-MGR node (mirror push)</option>
-        <option value="unifi">UniFi Cloud Gateway (Static DNS)</option>
+      <select id="pt-kind" class="form-control" onchange="pushTargetKind()" ${cur ? 'disabled' : ''}>
+        <option value="dnsmaq" ${kind === 'dnsmaq' ? 'selected' : ''}>DNSMAQ-MGR node (mirror push)</option>
+        <option value="unifi" ${kind === 'unifi' ? 'selected' : ''}>UniFi Cloud Gateway (direct reconcile)</option>
       </select></div>
     <div class="form-group"><label>Name</label>
-      <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"></div>
+      <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"
+        value="${cur ? escapeHtml(cur.name) : ''}" ${cur ? 'readonly' : ''}></div>
     <div class="form-group"><label>URL</label>
-      <input id="pt-url" class="form-control" placeholder="https://dns-node:8443" spellcheck="false"></div>
+      <input id="pt-url" class="form-control" placeholder="https://dns-node:8443" spellcheck="false"
+        value="${cur ? escapeHtml(cur.url || '') : ''}"></div>
     <div class="form-group"><label>Sections to push</label>
       ${pushSections.map(s => `
         <label class="checkitem" style="padding-left:0"><input class="pt-section" type="checkbox"
-          value="${escapeHtml(s)}" ${s === 'hosts' ? 'checked' : ''}> ${escapeHtml(s)}</label>`).join('')}
+          value="${escapeHtml(s)}" ${subs.includes(s) ? 'checked' : ''}> ${escapeHtml(s)}</label>`).join('')}
       <p class="help">What this target receives. A target only gets what it subscribes to,
         so a DNS-only node is never handed DHCP.</p></div>
+    <div class="form-group"><label>TLS verification</label>
+      <input id="pt-verify" class="form-control" placeholder="insecure" spellcheck="false"
+        value="${cur ? escapeHtml(cur.verify || 'insecure') : ''}">
+      <p class="help"><code>insecure</code>, or <code>fingerprint:&lt;sha256-hex&gt;</code> to pin the
+        target's certificate — worth setting on anything that carries credentials, since the push
+        then refuses to talk to an impostor.</p></div>
 
     <div id="pt-dnsmaq">
       <div class="form-group"><label>Mirror token (generate on the node: Mirroring → receive token)</label>
-        <input id="pt-token" class="form-control" placeholder="dmm_…" spellcheck="false"></div>
+        <input id="pt-token" class="form-control" spellcheck="false"
+          placeholder="${cur && cur.has_token ? '(unchanged — leave empty to keep the stored token)' : 'dmm_…'}"></div>
       <p class="help">The node must have "accept mirrored config" enabled. The pushed hosts section
         becomes read-only there; "Detach" on its Mirroring page hands control back at any time.</p>
     </div>
 
     <div id="pt-unifi" style="display:none">
       <div class="form-group"><label>Gateway username</label>
-        <input id="pt-user" class="form-control" placeholder="admin" autocomplete="off"></div>
+        <input id="pt-user" class="form-control" placeholder="admin" autocomplete="off"
+          value="${cur ? escapeHtml(cur.unifi_username || '') : ''}"></div>
       <div class="form-group"><label>Gateway password</label>
-        <input id="pt-pass" class="form-control" type="password" autocomplete="new-password"></div>
+        <input id="pt-pass" class="form-control" type="password" autocomplete="new-password"
+          placeholder="${cur && cur.has_password ? '(unchanged — leave empty to keep the stored password)' : ''}"></div>
       <div class="form-group"><label>Site</label>
-        <input id="pt-site" class="form-control" value="default" spellcheck="false"></div>
-      <label class="checkitem" style="padding-left:0"><input id="pt-delextra" type="checkbox">
+        <input id="pt-site" class="form-control" spellcheck="false"
+          value="${cur ? escapeHtml(cur.unifi_site || 'default') : 'default'}"></div>
+
+      <h4 style="margin-top:12px">hosts section (Static DNS)</h4>
+      <label class="checkitem" style="padding-left:0"><input id="pt-delextra" type="checkbox"
+        ${cur && cur.unifi_delete_extra ? 'checked' : ''}>
         Delete Static DNS entries this IPAM did not create</label>
-      <label class="checkitem" style="padding-left:0"><input id="pt-claim" type="checkbox">
+      <label class="checkitem" style="padding-left:0"><input id="pt-claim" type="checkbox"
+        ${cur && cur.unifi_claim_client_dns ? 'checked' : ''}>
         Take names held by a client's own Local DNS Record</label>
       <p class="help">Use a local admin with MFA disabled — the gateway API refuses a 2FA login.
         The first option makes this IPAM authoritative over the gateway's whole A/AAAA table;
         leave it off and the sync only adds and updates. The second unticks a client's Local DNS
         Record (its DHCP reservation is left alone) so a static entry for that name is accepted.</p>
+
+      <h4 style="margin-top:12px">dhcp section (scopes &amp; reservations)</h4>
+      <label class="checkitem" style="padding-left:0"><input id="pt-dhcp-delextra" type="checkbox"
+        ${cur && cur.unifi_dhcp_delete_extra ? 'checked' : ''}>
+        Withdraw DHCP reservations the plan does not list</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-scope-state" type="checkbox"
+        ${cur && cur.unifi_manage_scope_state ? 'checked' : ''}>
+        Manage scope on/off state (dhcpd_enabled)</label>
+      <p class="help"><strong>Both have a large blast radius; leave them off unless you are
+        certain.</strong> The first clears every fixed-IP binding on the gateway that this plan does
+        not list — machines relying on those reservations lose their addresses at their next
+        renewal. The second lets a range that is disabled in the plan turn a VLAN's DHCP server
+        <em>off</em>, which is an outage, not a config tweak. They apply only when this target
+        receives the <code>dhcp</code> section.</p>
     </div>
-    <button class="btn" onclick="pushTargetSave()">Add target</button>`);
+    <button class="btn" onclick="pushTargetSave()">${cur ? 'Save' : 'Add target'}</button>`);
+  pushTargetKind();
 }
 
 function pushTargetKind() {
@@ -445,14 +524,19 @@ async function pushTargetSave() {
     name: $('pt-name').value.trim(),
     url: $('pt-url').value.trim(),
     sections: [...document.querySelectorAll('.pt-section:checked')].map(el => el.value),
+    verify: $('pt-verify').value.trim() || 'insecure',
   };
   if (kind === 'unifi') {
     body.unifi_username = $('pt-user').value.trim();
-    body.unifi_password = $('pt-pass').value;
+    // Empty means "keep the stored secret" on an existing target — the API
+    // only replaces a password/token that is actually sent.
+    if ($('pt-pass').value) body.unifi_password = $('pt-pass').value;
     body.unifi_site = $('pt-site').value.trim() || 'default';
     body.unifi_delete_extra = $('pt-delextra').checked;
     body.unifi_claim_client_dns = $('pt-claim').checked;
-  } else {
+    body.unifi_dhcp_delete_extra = $('pt-dhcp-delextra').checked;
+    body.unifi_manage_scope_state = $('pt-scope-state').checked;
+  } else if ($('pt-token').value.trim()) {
     body.token = $('pt-token').value.trim();
   }
   try {
@@ -475,7 +559,93 @@ async function pushRunNow(btn, target) {
   try {
     const r = await API.post('/api/push/run' + (target ? '?target=' + encodeURIComponent(target) : ''), {});
     alert(r.results.map(x => `${x.name}: ${x.ok ? 'ok — ' : 'FAILED — '}${x.detail}`).join('\n')
-          + `\n\n${r.records} record(s), serial ${r.serial}`);
+          + '\n\n' + r.sections.map(s =>
+            `${s}: ${r.counts[s]} record(s), serial ${r.serials[s]}`).join('\n'));
   } catch (e) { alert(e.message); }
   page_settings();
+}
+
+// ─── Adopt from a gateway (pull) ────────────────────────
+// Reads a UniFi target's DHCP state into the plan. Deliberately presented as
+// ADOPTION, not sync: one explicit "take what is there", gap-filling only,
+// after a read-only preview of what the gateway holds.
+
+async function pullTargetModal(name) {
+  openModal('Adopt from ' + name, `
+    <p class="help">Reads this gateway's networks, DHCP scopes, options and fixed reservations
+      into the address plan. Adoption <strong>fills gaps and never overwrites</strong>: anything
+      already recorded here keeps its value (reported as kept), and a scope that overlaps a
+      recorded range is refused rather than added alongside it. Re-running is safe.</p>
+    <div id="pull-body"><p class="loading">Reading ${escapeHtml(name)}…</p></div>`, {wide: true});
+  let r;
+  try {
+    r = await API.post('/api/push/targets/' + encodeURIComponent(name) + '/pull?dry_run=1', {});
+  } catch (e) {
+    const el = $('pull-body');
+    if (el) el.innerHTML = `<div class="alert alert-danger">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const el = $('pull-body');
+  if (!el) return;   // modal closed while reading
+  const nets = (r.state || {}).networks || [];
+  const res = (r.state || {}).reservations || [];
+  el.innerHTML = `
+    <h4>The gateway holds</h4>
+    ${dataTable([
+      {label: 'Network', get: n => `<span class="cidr">${escapeHtml(n.cidr)}</span>${n.name ? '<br><span class="muted">' + escapeHtml(n.name) + '</span>' : ''}`},
+      {label: 'VLAN', get: n => n.vlan != null ? escapeHtml(String(n.vlan)) : '<span class="muted">—</span>'},
+      {label: 'Gateway', get: n => escapeHtml(n.gateway || '') || '<span class="muted">—</span>'},
+      {label: 'DNS', get: n => escapeHtml((n.dns || []).join(', ')) || '<span class="muted">gateway</span>'},
+      {label: 'Domain', get: n => escapeHtml(n.domain || '') || '<span class="muted">—</span>'},
+      {label: 'Scope', get: n => n.range
+        ? `<span class="cidr">${escapeHtml(n.range.start)} – ${escapeHtml(n.range.end)}</span>` +
+          (n.range.enabled ? '' : ' <span class="status-badge gray">disabled</span>')
+        : '<span class="muted">none</span>'},
+      {label: 'Options', get: n => escapeHtml(Object.keys(n.options || {}).join(', ')) || '<span class="muted">—</span>'},
+    ], nets, 'No networks readable on this gateway')}
+    <h4 style="margin-top:14px">Fixed reservations <span class="help">(${res.length})</span></h4>
+    ${dataTable([
+      {label: 'Address', get: x => `<span class="cidr">${escapeHtml(x.ip)}</span>`},
+      {label: 'MAC', get: x => escapeHtml(x.mac || '')},
+      {label: 'Gateway name', get: x => escapeHtml(x.hostname || '') || '<span class="muted">—</span>'},
+    ], res, 'No fixed-IP reservations on this gateway')}
+    <div class="toolbar" style="margin-top:14px">
+      <button class="btn" onclick="pullTargetGo('${jsArg(name)}', this)">Adopt into the plan</button>
+    </div>
+    <p class="help">Nothing has been written yet — this preview is read-only.</p>`;
+}
+
+async function pullTargetGo(name, btn) {
+  btn.disabled = true; btn.textContent = 'Adopting…';
+  let r;
+  try {
+    r = await API.post('/api/push/targets/' + encodeURIComponent(name) + '/pull', {});
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false; btn.textContent = 'Adopt into the plan';
+    return;
+  }
+  const el = $('pull-body');
+  if (!el) return;
+  const groups = [['networks', 'Networks'], ['ranges', 'DHCP ranges'],
+                  ['options', 'DHCP options'], ['reservations', 'Reservations']];
+  const cells = groups.map(([key, label]) => {
+    const bits = ['created', 'updated', 'kept'].map(verb => {
+      const items = r[key + '_' + verb] || [];
+      if (!items.length) return '';
+      const detail = verb === 'kept' ? '' :
+        `<br><span class="muted">${escapeHtml(items.slice(0, 12).join(', '))}${items.length > 12 ? ` +${items.length - 12} more` : ''}</span>`;
+      return `${items.length} ${verb}${detail}`;
+    }).filter(Boolean);
+    return `<div><dt>${escapeHtml(label)}</dt><dd>${bits.join('<br>') || 'nothing to take'}</dd></div>`;
+  });
+  el.innerHTML = `
+    ${(r.errors || []).map(e => `<div class="alert alert-danger">${escapeHtml(e)}</div>`).join('')}
+    <h4>Adopted from ${escapeHtml(name)}</h4>
+    <dl class="detail-grid">${cells.join('')}</dl>
+    <p class="help">Kept = already recorded here with a value, left untouched. Errors above (if any)
+      are disagreements to resolve by hand — nothing was forced.</p>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn btn-sm" onclick="closeModal(); page_settings()">Done</button>
+    </div>`;
 }

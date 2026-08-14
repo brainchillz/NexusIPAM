@@ -44,6 +44,42 @@ const DHCP_RANGE_FIELDS = [
   {name: 'description', label: 'Description'},
 ];
 
+const DHCP_OPTION_FIELDS = [
+  {name: 'network_id', label: 'Network', type: 'select', options: []},
+  {name: 'option', label: 'Option', placeholder: 'option:ntp-server — or a bare code like 42',
+   help: 'dnsmasq spelling, the canonical form every renderer translates from. Router, DNS ' +
+         'servers and the domain are refused here on purpose: they live on the network itself, ' +
+         'so the address plan and DHCP cannot disagree.'},
+  {name: 'value', label: 'Value', placeholder: '10.0.0.5 (comma-separated for list options)'},
+  {name: 'enabled', label: 'Enabled', type: 'checkbox', def: true,
+   help: 'A disabled option keeps its definition but is left out of every rendered payload.'},
+  {name: 'description', label: 'Description'},
+];
+
+async function dhcpOptionModal(id, presetNetworkId) {
+  const fields = DHCP_OPTION_FIELDS.map(f => ({...f}));
+  const nets = await API.get('/api/networks');
+  fields.find(f => f.name === 'network_id').options =
+    nets.networks.filter(n => n.role !== 'container').map(n => [n.id, n.cidr + (n.name ? ' — ' + n.name : '')]);
+
+  let rec = id ? await API.get('/api/dhcp/options/' + id) : null;
+  if (!rec && presetNetworkId) rec = {network_id: presetNetworkId, enabled: true};
+  if (rec) rec.enabled = rec.enabled !== 0 && rec.enabled !== false;
+
+  openModal(id ? 'Edit DHCP option' : 'Add DHCP option',
+    buildForm(fields, rec) +
+    `<button class="btn" onclick="saveResource('/api/dhcp/options', ${id || 0}, DHCP_OPTION_FORM)">${id ? 'Save' : 'Add'}</button>`);
+  window.DHCP_OPTION_FORM = fields;
+}
+
+// Flip just the enabled flag; partial-update semantics keep everything else.
+async function dhcpOptionToggle(id, to) {
+  try {
+    await API.post('/api/dhcp/options/' + id, {enabled: to});
+    reloadPage();
+  } catch (e) { alert(e.message); }
+}
+
 // ─── DHCP page ────────────────────────────────────────────
 
 async function page_dhcp() {

@@ -279,6 +279,8 @@ def network_detail(rid):
     ranges = db.rows('SELECT dhcp_ranges.*, dhcp_servers.name AS server_name '
                      'FROM dhcp_ranges LEFT JOIN dhcp_servers ON dhcp_servers.id = dhcp_ranges.server_id '
                      'WHERE dhcp_ranges.network_id=? ORDER BY start_hex', (rid,))
+    options = db.rows('SELECT * FROM dhcp_options WHERE network_id=? '
+                      'ORDER BY option', (rid,))
 
     return jsonify({'network': net_row,
                     'utilization': utilization(net_row),
@@ -286,6 +288,7 @@ def network_detail(rid):
                     'children': children_of(net_row),
                     'addresses': addresses,
                     'dhcp_ranges': ranges,
+                    'dhcp_options': options,
                     'enumerable': netutil.enumerable(net),
                     'deploy': netutil.deploy_payload(net_row)})
 

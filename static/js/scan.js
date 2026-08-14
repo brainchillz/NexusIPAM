@@ -5,10 +5,12 @@ let _scanPoll = null;
 
 async function page_scan() {
   stopScanPoll();
-  const [nets, jobs, rec] = await Promise.all([
+  const [nets, jobs, rec, lv, push] = await Promise.all([
     API.get('/api/networks'),
     API.get('/api/scan/jobs'),
     API.get('/api/scan/reconcile'),
+    API.get('/api/leases').catch(() => null),
+    API.get('/api/push').catch(() => null),
   ]);
 
   const netOpts = nets.networks.filter(n => n.role !== 'container')
@@ -85,7 +87,61 @@ async function page_scan() {
       {label: '', cls: 'row-actions', get: s => canWrite() ? `
         <button class="btn btn-sm btn-outline" onclick="verifyOne('${jsArg(s.address)}')">Re-check</button>
         <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/addresses', ${s.id}, '${jsArg(s.address)}')">Delete record</button>` : ''},
-    ], rec.stale, 'None — every active record answered its last probe')}`;
+    ], rec.stale, 'None — every active record answered its last probe')}
+    ${lv ? leaseOverlaySection(lv, push) : ''}`;
+}
+
+// ─── Lease overlay ──────────────────────────────────────
+// The DHCP server's own ledger, refreshed from a gateway push target. Where
+// the ping-derived list above infers "probably a lease", this is authoritative
+// about what is leased right now — and it is the only view that can say a
+// recorded reservation is being ignored (the address answered for another MAC).
+
+function leaseOverlaySection(lv, push) {
+  const targets = ((push && push.targets) || []).filter(t => t.kind === 'unifi');
+  const conflicts = (lv.leases || []).filter(l => l.conflict);
+  const planCell = l => {
+    if (l.conflict) {
+      return `<span class="status-badge red">MAC conflict</span>
+        <span class="muted">reserved for ${escapeHtml(l.record_mac)}</span>`;
+    }
+    if (l.unrecorded) return '<span class="status-badge yellow">unrecorded</span>';
+    return `${escapeHtml(l.record_name || '') || statusBadge(l.record_status)}`;
+  };
+  return `
+    <h3 style="margin-top:24px">Lease overlay <span class="help">(${lv.count})</span></h3>
+    <p class="help">Dynamic leases read straight from the DHCP server — observed, never written
+      into the plan, and aged out on their own. The rows that matter are the disagreements:
+      a lease whose MAC differs from the recorded reservation means the address is reserved for
+      one machine and being used by another.</p>
+    ${canWrite() && targets.length ? `<div class="toolbar">${targets.map(t =>
+      `<button class="btn btn-sm" onclick="refreshLeases('${jsArg(t.name)}', this)">Refresh from ${escapeHtml(t.name)}</button>`).join('')}
+    </div>` : ''}
+    ${conflicts.length ? `
+    <div class="alert alert-danger"><strong>${conflicts.length}</strong> reservation
+      conflict(s) — the recorded MAC is not the one holding the lease.</div>` : ''}
+    ${dataTable([
+      {label: 'Address', sortKey: 'addr_hex', get: l => `<a class="cidr" onclick="addressPeek('${jsArg(l.address)}')">${escapeHtml(l.address)}</a>`},
+      {label: 'Leased to (MAC)', sortKey: 'mac', get: l => escapeHtml(l.mac || '') || '<span class="muted">—</span>'},
+      {label: 'Hostname', sortKey: 'hostname', get: l => escapeHtml(l.hostname || '') || '<span class="muted">—</span>'},
+      {label: 'Plan record', sortKey: l => (l.conflict ? 0 : l.unrecorded ? 1 : 2), get: planCell},
+      {label: 'Expires', sortKey: 'expires', get: l => l.expires ? escapeHtml(fmtTs(l.expires)) : '<span class="muted">—</span>'},
+      {label: 'Source', get: l => typeBadge(l.source)},
+      {label: 'Seen', sortKey: 'seen', get: l => escapeHtml(fmtAgo(l.seen))},
+    ], lv.leases || [],
+      targets.length
+        ? 'Empty — refresh from a gateway target to populate it'
+        : 'Empty — add a UniFi push target (Settings → Push targets), then refresh from it here',
+      {key: 'leases'})}`;
+}
+
+async function refreshLeases(name, btn) {
+  btn.disabled = true; btn.textContent = 'Refreshing…';
+  try {
+    const r = await API.post('/api/push/targets/' + encodeURIComponent(name) + '/leases', {});
+    alert(`${name}: ${r.leases} lease(s) recorded, ${r.expired} gone since last refresh.`);
+  } catch (e) { alert(e.message); }
+  page_scan();
 }
 
 function renderJobs(jobs) {

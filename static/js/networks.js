@@ -115,6 +115,27 @@ async function networkDetail(id) {
         <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/dhcp/ranges', ${r.id}, '${jsArg(r.start_addr)}')">Delete</button>` : ''},
     ], d.dhcp_ranges, 'No DHCP ranges in this network')}`;
 
+  const options = `
+    <h3 style="margin-top:24px">DHCP options</h3>
+    <p class="help">Extra options this network's scope hands out (NTP, PXE, WPAD, …), in dnsmasq
+      spelling, rendered into every pushed <code>dhcp</code> payload. Router, DNS and domain are
+      deliberately <strong>not</strong> options — they come from this network's own Gateway,
+      DNS servers and Domain fields${canWrite()
+        ? ` (<a onclick="networkModal(${n.id})">edit the network</a> to change them)` : ''},
+      so there is exactly one copy of each.</p>
+    ${canWrite() ? `<div class="toolbar"><button class="btn btn-sm" onclick="dhcpOptionModal(null, ${n.id})">+ Add option</button></div>` : ''}
+    ${dataTable([
+      {label: 'Option', get: o => `<code>${escapeHtml(o.option)}</code>`},
+      {label: 'Value', get: o => `<code>${escapeHtml(o.value)}</code>`},
+      {label: 'State', get: o => `<span class="status-badge ${o.enabled ? 'green' : 'gray'}">${o.enabled ? 'enabled' : 'disabled'}</span>`},
+      {label: 'Description', get: o => escapeHtml(o.description || '') || '<span class="muted">—</span>'},
+      {label: '', cls: 'row-actions', get: o => canWrite() ? `
+        <button class="btn btn-sm btn-outline" onclick="dhcpOptionModal(${o.id})">Edit</button>
+        <button class="btn btn-sm btn-outline" onclick="dhcpOptionToggle(${o.id}, ${o.enabled ? 'false' : 'true'})">${o.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteResource('/api/dhcp/options', ${o.id}, '${jsArg(o.option)}')">Delete</button>` : ''},
+    ], d.dhcp_options || [],
+      'No extra options — the scope hands out only the gateway, DNS and domain above')}`;
+
   const addresses = `
     <h3 style="margin-top:24px">Address records <span class="help">(${d.addresses.length})</span></h3>
     ${canWrite() ? `<div class="toolbar">
@@ -144,6 +165,7 @@ async function networkDetail(id) {
         Browse its contained networks instead.</div>`}
     ${children}
     ${ranges}
+    ${options}
     ${addresses}`;
 
   if (d.enumerable) renderIpMap(n.id);
@@ -196,6 +218,7 @@ async function addressPeek(address) {
     ['DNS name', rec ? (rec.dns_name || '—') : '—'],
     ['Assigned to', rec && rec.assigned_name ? `${rec.assigned_name} (${rec.assigned_kind})` : '—'],
     ['MAC', rec ? (rec.mac || '—') : '—'],
+    ['DHCP reservation', rec ? (rec.is_reservation ? 'yes — published in the dhcp section' : 'no') : '—'],
     ['Interface', rec ? (rec.if_name || '—') : '—'],
     ['Source', rec ? rec.source : '—'],
     ['Description', rec ? (rec.description || '—') : '—'],

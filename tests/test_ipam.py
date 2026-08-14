@@ -1291,6 +1291,12 @@ def test_dhcp_options_are_server_neutral_and_scoped_to_a_network(client):
                        json={'network_id': 9999, 'option': '42',
                              'value': 'x'}).status_code == 400
 
+    # The network detail page is where the options editor lives, so the
+    # detail payload must carry them alongside the ranges.
+    detail = client.get(f'/api/networks/{nid}/detail').json
+    assert sorted(o['option'] for o in detail['dhcp_options']) == \
+        ['66', 'option:ntp-server']
+
 
 def test_dhcp_option_value_cannot_restructure_a_config_file(client):
     nid = mknet(client, '10.61.0.0/24')
@@ -2206,7 +2212,6 @@ def test_provision_bad_alias_rolls_back_allocation(client, monkeypatch):
                                             'aliases': ['not a name']})
     assert r.status_code == 400
     # the allocated address was rolled back, not leaked
-    free_before = client.get('/api/networks').json
     r2 = client.post('/api/provision', json={'name': 'ok.example.net',
                                              'network': '10.41.0.0/29'})
     assert r2.status_code == 200
