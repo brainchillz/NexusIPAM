@@ -2851,7 +2851,13 @@ def test_push_run_dispatches_to_the_unifi_adapter(client, monkeypatch):
         '1 created, 0 updated, 0 deleted, 3 unchanged'
 
 
-def test_push_run_reports_unifi_conflicts_as_failure(client, monkeypatch):
+def test_push_run_reports_conflicts_loudly_but_grants_serial_credit(client, monkeypatch):
+    """A standing conflict (client DNS holding a name, an inexpressible
+    option) means everything expressible DID apply — the target holds the
+    content. It stays loud in the detail, but only actual write failures
+    make the push not-ok: treating caveats as failure withheld serial credit,
+    so a target with a permanent conflict read "behind" forever while drift
+    said in-sync (found on the live panel)."""
     from nexusipam import unifi
     client.post('/api/push/targets',
                 json={'name': 'gw', 'url': 'https://10.0.0.1', 'kind': 'unifi',
@@ -2861,9 +2867,22 @@ def test_push_run_reports_unifi_conflicts_as_failure(client, monkeypatch):
         'covered': 0, 'conflicts': [('a.lan', '10.0.0.1', '10.9.9.9')],
         'failed': 0, 'errors': []})
     r = client.post('/api/push/run')
+    assert r.json['success'] is True
+    st = client.get('/api/push').json
+    t = st['targets'][0]
+    assert 'client DNS holds a.lan at 10.9.9.9' in t['last']['detail']
+    assert t['serials'] == {'hosts': 1}                    # credit granted
+    assert st['serials']['hosts'] == 1
+
+    # A genuine write failure still blocks credit.
+    monkeypatch.setattr(unifi, 'sync_hosts', lambda peer, hosts, client=None: {
+        'created': 0, 'updated': 0, 'deleted': 0, 'claimed': 0, 'unchanged': 0,
+        'covered': 0, 'conflicts': [], 'failed': 2, 'errors': ['x: HTTP 500']})
+    _mk_addr(client, '10.30.1.99', dns_name='bump.lan')    # content changes
+    r = client.post('/api/push/run')
     assert r.json['success'] is False
-    detail = client.get('/api/push').json['targets'][0]['last']['detail']
-    assert 'client DNS holds a.lan at 10.9.9.9' in detail
+    t = client.get('/api/push').json['targets'][0]
+    assert t['serials'] == {'hosts': 1}                    # still the old one
 
     # An unreachable gateway is a failed target, never a 500.
     def boom(peer, hosts, client=None):

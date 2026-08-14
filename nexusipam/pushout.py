@@ -460,8 +460,15 @@ def _push_reconcile(target, data):
             bits.append('%d already covered by client DNS' % s['covered'])
         line = ', '.join(bits)
         if s['failed'] or s['conflicts']:
-            ok = False
+            # Conflicts stay LOUD in the detail — but only actual write
+            # failures make the push not-ok. A standing conflict (an option
+            # the server cannot express, a name its client DNS holds) means
+            # everything expressible DID apply; treating it as failure
+            # withheld serial credit, so such a target read "behind" forever
+            # while drift said in-sync. Failures block credit; caveats don't.
             line = '%s (%s)' % (adapter.status_line(s), line)
+        if s['failed']:
+            ok = False
         parts.append('%s: %s' % (section, line) if len(data) > 1 else line)
     if not parts:
         return True, 'nothing to sync'
