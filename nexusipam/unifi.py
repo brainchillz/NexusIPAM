@@ -703,6 +703,89 @@ def sync_dhcp(peer, payload, client=None):
             client.logout()
 
 
+def _opts_from_network(n):
+    """The gateway's dhcpd_* fields -> dnsmasq option spellings.
+
+    Only what the gateway is actually handing out: UniFi keeps stale values in
+    the disabled fields (an old NTP server sits in dhcpd_ntp_1 with
+    dhcpd_ntp_enabled false), and adopting those would put addresses into the
+    plan that no client has ever been told about.
+    """
+    out = {}
+    if n.get('dhcpd_gateway_enabled') and n.get('dhcpd_gateway'):
+        out['option:router'] = n['dhcpd_gateway']
+    if n.get('dhcpd_dns_enabled'):
+        dns = [n.get('dhcpd_dns_%d' % i) for i in (1, 2, 3, 4)]
+        dns = [d for d in dns if d]
+        if dns:
+            out['option:dns-server'] = ','.join(dns)
+    if n.get('dhcpd_ntp_enabled'):
+        ntp = [n.get('dhcpd_ntp_%d' % i) for i in (1, 2) if n.get('dhcpd_ntp_%d' % i)]
+        if ntp:
+            out['option:ntp-server'] = ','.join(ntp)
+    if n.get('dhcpd_tftp_server'):
+        out['option:tftp-server'] = n['dhcpd_tftp_server']
+    if n.get('dhcpd_boot_enabled') and n.get('dhcpd_boot_filename'):
+        out['option:bootfile-name'] = n['dhcpd_boot_filename']
+        if n.get('dhcpd_boot_server'):
+            out['option:tftp-server'] = n['dhcpd_boot_server']
+    if n.get('dhcpd_wpad_url'):
+        out['option:wpad-url'] = n['dhcpd_wpad_url']
+    return out
+
+
+def read_state(peer, client=None):
+    """Everything IPAM can adopt from a gateway, in ITS OWN vocabulary.
+
+    This is the inverse of sync_dhcp and the starting point for a site whose
+    DHCP already lives on the gateway: pull the truth in once, then author it
+    here. Returns networks (each with its scope and options) and every fixed
+    reservation.
+    """
+    own = client is None
+    if own:
+        session = HttpsSession(peer['url'], peer.get('verify', 'system'))
+        client = UniFiClient(session, peer.get('unifi_site') or 'default')
+        client.login(peer.get('unifi_username') or '', peer.get('unifi_password') or '')
+    try:
+        nets, fixed = client.list_networks(), client.list_fixed()
+        out = {'networks': [], 'reservations': []}
+        for cidr, n in sorted(nets.items()):
+            iface = None
+            try:
+                iface = ipaddress.ip_interface(n.get('ip_subnet') or '')
+            except ValueError:
+                pass
+            rec = {'cidr': cidr, 'ext_id': n.get('_id') or '',
+                   'name': n.get('name') or '',
+                   'vlan': n.get('vlan') if n.get('vlan_enabled') else None,
+                   # The gateway's own interface is the segment's router, and
+                   # UniFi only stores dhcpd_gateway when it is something else.
+                   'gateway': n.get('dhcpd_gateway') if n.get('dhcpd_gateway_enabled')
+                              else (str(iface.ip) if iface else ''),
+                   'domain': n.get('domain_name') or '',
+                   'options': _opts_from_network(n), 'range': None}
+            dns = [n.get('dhcpd_dns_%d' % i) for i in (1, 2, 3, 4)]
+            rec['dns'] = [d for d in dns if d] if n.get('dhcpd_dns_enabled') else []
+            if n.get('dhcpd_start') and n.get('dhcpd_stop'):
+                # Imported whether or not DHCP is switched on: a defined range
+                # consumes that space regardless, which is the whole point of
+                # recording it. `enabled` carries the distinction.
+                rec['range'] = {'start': n['dhcpd_start'], 'end': n['dhcpd_stop'],
+                                'lease': '%dh' % max(1, lease_seconds(
+                                    n.get('dhcpd_leasetime'), 86400) // 3600),
+                                'enabled': bool(n.get('dhcpd_enabled'))}
+            out['networks'].append(rec)
+        for mac, f in sorted(fixed.items()):
+            out['reservations'].append({'mac': mac, 'ip': f['ip'],
+                                        'hostname': f.get('name') or '',
+                                        'ext_id': f.get('id') or ''})
+        return out
+    finally:
+        if own:
+            client.logout()
+
+
 # Which sections this adapter can reconcile. Registering a section here is
 # what makes it pushable to a gateway at all — a section with no syncer is
 # skipped rather than silently reported as applied.

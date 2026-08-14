@@ -1608,6 +1608,124 @@ def test_lease_seconds_round_trips_dnsmasq_spellings():
     assert unifi.lease_seconds('nonsense') == 86400
 
 
+# ─── Adopting a gateway's existing state ──────────────────────────────
+
+_SNAPSHOT = {
+    'networks': [{
+        'cidr': '10.90.0.0/24', 'ext_id': 'n1', 'name': 'lan', 'vlan': 9,
+        'gateway': '10.90.0.1', 'dns': ['10.90.0.53'], 'domain': 'lab.lan',
+        'options': {'option:ntp-server': '10.90.0.5',
+                    'option:router': '10.90.0.1'},
+        'range': {'start': '10.90.0.100', 'end': '10.90.0.200',
+                  'lease': '24h', 'enabled': True}}],
+    'reservations': [{'mac': 'aa:bb:cc:00:90:01', 'ip': '10.90.0.10',
+                      'hostname': 'printer', 'ext_id': 'u1'}],
+}
+
+
+def test_adopt_creates_the_whole_scope_and_is_idempotent(client):
+    from nexusipam import adopt
+    from nexusipam.core import db
+    r = adopt.adopt_snapshot(_SNAPSHOT)
+    assert r['networks_created'] == ['10.90.0.0/24']
+    assert r['ranges_created'] == ['10.90.0.100-10.90.0.200']
+    assert r['reservations_created'] == ['10.90.0.10'] and not r['errors']
+    net = db.query_one('SELECT * FROM networks WHERE cidr=?', ('10.90.0.0/24',))
+    assert (net['gateway'], net['dns_servers'], net['domain']) == \
+        ('10.90.0.1', '10.90.0.53', 'lab.lan')
+    assert db.query_one('SELECT vid FROM vlans')['vid'] == 9
+    # option:router was adopted onto the network row, not duplicated as an
+    # option — the two would drift.
+    opts = [o['option'] for o in db.query('SELECT option FROM dhcp_options')]
+    assert opts == ['option:ntp-server']
+    # The reservation files under the network it belongs to.
+    res = db.query_one('SELECT * FROM ip_addresses WHERE address=?', ('10.90.0.10',))
+    assert res['status'] == 'reserved' and res['network_id'] == net['id']
+
+    again = adopt.adopt_snapshot(_SNAPSHOT)
+    assert again['networks_kept'] == ['10.90.0.0/24']
+    assert again['ranges_kept'] and again['reservations_kept'] == ['10.90.0.10']
+    assert not again['networks_created'] and not again['errors']
+    assert db.query_one('SELECT COUNT(*) c FROM dhcp_ranges')['c'] == 1
+
+
+def test_adopt_fills_gaps_but_never_overwrites(client):
+    """An adopt that clobbered a corrected value would make the operator's own
+    work the thing most likely to be lost."""
+    from nexusipam import adopt
+    from nexusipam.core import db
+    nid = mknet(client, '10.90.0.0/24', name='hand-named', domain='mine.lan')
+    _mk_addr(client, '10.90.0.10', dns_name='printer.mine.lan')
+    adopt.adopt_snapshot(_SNAPSHOT)
+    net = db.query_one('SELECT * FROM networks WHERE id=?', (nid,))
+    assert net['name'] == 'hand-named' and net['domain'] == 'mine.lan'
+    assert net['gateway'] == '10.90.0.1'          # the blank was filled
+    rec = db.query_one('SELECT * FROM ip_addresses WHERE address=?', ('10.90.0.10',))
+    assert rec['dns_name'] == 'printer.mine.lan'  # name untouched
+    assert rec['mac'] == 'aa:bb:cc:00:90:01'      # MAC merged in
+
+
+def test_adopt_refuses_to_add_an_overlapping_range(client):
+    """Two pools handing out the same address is the conflict this app exists
+    to prevent — adopting one alongside another would create it."""
+    from nexusipam import adopt
+    from nexusipam.core import db
+    nid = mknet(client, '10.90.0.0/24')
+    client.post('/api/dhcp/ranges', json={'network_id': nid,
+                                          'start_addr': '10.90.0.150',
+                                          'end_addr': '10.90.0.250'})
+    r = adopt.adopt_snapshot(_SNAPSHOT)
+    assert r['errors'] and 'overlaps' in r['errors'][0]
+    assert db.query_one('SELECT COUNT(*) c FROM dhcp_ranges')['c'] == 1
+
+
+def test_adopt_keeps_a_defined_but_disabled_scope(client):
+    from nexusipam import adopt
+    from nexusipam.core import db
+    import copy
+    snap = copy.deepcopy(_SNAPSHOT)
+    snap['networks'][0]['range']['enabled'] = False
+    adopt.adopt_snapshot(snap)
+    # A defined range consumes that space whether or not it is serving, which
+    # is exactly why it belongs in the plan.
+    assert db.query_one('SELECT enabled FROM dhcp_ranges')['enabled'] == 0
+
+
+def test_pull_route_rejects_a_dnsmaq_target(client):
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    r = client.post('/api/push/targets/ns1/pull')
+    assert r.status_code == 400 and 'UniFi' in r.json['error']
+    assert client.post('/api/push/targets/nope/pull').status_code == 404
+
+
+def test_unifi_read_state_ignores_disabled_option_fields():
+    """UniFi keeps stale values in fields it is not using — adopting those
+    would record addresses no client has ever been handed."""
+    from nexusipam import unifi
+    raw = {'_id': 'n1', 'name': 'LAN', 'ip_subnet': '10.91.0.1/24',
+           'vlan_enabled': True, 'vlan': 9,
+           'dhcpd_enabled': True, 'dhcpd_start': '10.91.0.100',
+           'dhcpd_stop': '10.91.0.200', 'dhcpd_leasetime': 86400,
+           'dhcpd_ntp_enabled': False, 'dhcpd_ntp_1': '10.91.0.99',
+           'dhcpd_dns_enabled': False, 'dhcpd_dns_1': '10.91.0.98'}
+
+    class FakeClient:
+        def list_networks(self):
+            return {'10.91.0.0/24': raw}
+        def list_fixed(self):
+            return {}
+
+    state = unifi.read_state({}, client=FakeClient())
+    net = state['networks'][0]
+    assert 'option:ntp-server' not in net['options'] and net['dns'] == []
+    # With no explicit dhcpd_gateway, the segment's router is the gateway's
+    # own interface address.
+    assert net['gateway'] == '10.91.0.1'
+    assert net['range'] == {'start': '10.91.0.100', 'end': '10.91.0.200',
+                            'lease': '24h', 'enabled': True}
+
+
 # ─── Multi-section push ───────────────────────────────────────────────
 
 def _fake_section(monkeypatch, name, payload):
