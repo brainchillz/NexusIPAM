@@ -38,7 +38,7 @@ _local = threading.local()
 # sequences from interleaving.
 WRITE_LOCK = threading.RLock()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Objects an IP address can be assigned to. Polymorphic by design — a SQL FK
 # cannot point at four tables — so the app layer validates the target exists
@@ -268,6 +268,33 @@ CREATE TABLE IF NOT EXISTS dhcp_ranges (
   updated     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_dhcp_ranges_net ON dhcp_ranges(network_id);
+
+-- DHCP options a scope hands out, in a SERVER-NEUTRAL form so the same row
+-- renders to dnsmasq (a generic option/value list) and to a UniFi gateway
+-- (named dhcpd_* fields on the network object). dnsmasq's spelling is the
+-- canonical one — `option:ntp-server`, or a bare number — because it is the
+-- more expressive of the two: anything UniFi can express has a dnsmasq
+-- equivalent, and the reverse is not true.
+--
+-- Deliberately NOT here: router, dns-server and domain-name. Those are
+-- already on `networks` as gateway / dns_servers / domain, they drive
+-- allocation and the deploy payload, and a second copy would be a second
+-- source of truth. The renderers read them from there.
+CREATE TABLE IF NOT EXISTS dhcp_options (
+  id          INTEGER PRIMARY KEY,
+  network_id  INTEGER NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+  option      TEXT NOT NULL,                 -- 'option:ntp-server' | '42'
+  value       TEXT NOT NULL DEFAULT '',      -- comma-separated for list options
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  description TEXT NOT NULL DEFAULT '',
+  source      TEXT NOT NULL DEFAULT 'manual',
+  ext_id      TEXT NOT NULL DEFAULT '',
+  meta        TEXT NOT NULL DEFAULT '{}',
+  created     INTEGER NOT NULL DEFAULT 0,
+  updated     INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (network_id, option)
+);
+CREATE INDEX IF NOT EXISTS ix_dhcp_options_net ON dhcp_options(network_id);
 
 CREATE TABLE IF NOT EXISTS dns_servers (
   id          INTEGER PRIMARY KEY,

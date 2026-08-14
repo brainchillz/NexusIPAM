@@ -22,6 +22,13 @@ RE_LEASE = re.compile(r'^(\d+[smhdw]?|infinite)$')
 RE_URL = re.compile(r'^https?://[A-Za-z0-9.\[\]:_-]+(:\d{1,5})?(/[A-Za-z0-9._~/-]*)?$')
 RE_TAG = re.compile(r'^[a-z0-9][a-z0-9._-]{0,31}$')
 MAX_TAGS = 24
+# A DHCP option: dnsmasq's `option:name` / `option6:name` spelling, or a bare
+# code. Same shape DNSMAQ-MGR accepts, so a pushed option needs no rewriting.
+RE_DHCP_OPTION = re.compile(r'^(option6?:[a-z0-9-]{1,40}|\d{1,3})$')
+# Option values render straight into config files. Commas separate list
+# members (dnsmasq's own convention), so the character set is deliberately
+# narrow: no whitespace, quotes or line breaks that could restructure a line.
+RE_DHCP_OPT_VALUE = re.compile(r'^[A-Za-z0-9._:/,\[\]-]{0,255}$')
 
 # Controlled vocabularies. Kept as sets so the API rejects typos loudly
 # instead of quietly storing a value no page will ever filter on.

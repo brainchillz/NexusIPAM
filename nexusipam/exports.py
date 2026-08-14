@@ -23,7 +23,8 @@ bp = Blueprint('exports', __name__)
 # Tables included in a full dump/restore, in dependency order so a restore
 # never violates a foreign key.
 DUMP_TABLES = ('vlans', 'networks', 'clusters', 'devices', 'vms', 'containers',
-               'dhcp_servers', 'dns_servers', 'dhcp_ranges', 'ip_addresses')
+               'dhcp_servers', 'dns_servers', 'dhcp_ranges', 'dhcp_options',
+               'ip_addresses')
 
 
 def _named_addresses():

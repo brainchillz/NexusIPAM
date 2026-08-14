@@ -1265,6 +1265,109 @@ def test_push_failure_recorded(client, monkeypatch):
     assert t['serial'] == 0                          # never acked anything
 
 
+# ─── DHCP options (schema v4) ─────────────────────────────────────────
+
+def test_dhcp_options_are_server_neutral_and_scoped_to_a_network(client):
+    nid = mknet(client, '10.60.0.0/24', gateway='10.60.0.1')
+    r = client.post('/api/dhcp/options',
+                    json={'network_id': nid, 'option': 'option:ntp-server',
+                          'value': '10.60.0.5'})
+    assert r.status_code == 200, r.json
+    assert r.json['option']['option'] == 'option:ntp-server'
+    assert r.json['option']['network_cidr'] == '10.60.0.0/24'
+
+    # A bare code is equally valid — dnsmasq accepts both spellings.
+    assert client.post('/api/dhcp/options',
+                       json={'network_id': nid, 'option': '66',
+                             'value': '10.60.0.9'}).status_code == 200
+    # One value per option per network.
+    assert client.post('/api/dhcp/options',
+                       json={'network_id': nid, 'option': '66',
+                             'value': '10.60.0.9'}).status_code == 409
+    assert client.post('/api/dhcp/options',
+                       json={'network_id': nid, 'option': 'not an option',
+                             'value': 'x'}).status_code == 400
+    assert client.post('/api/dhcp/options',
+                       json={'network_id': 9999, 'option': '42',
+                             'value': 'x'}).status_code == 400
+
+
+def test_dhcp_option_value_cannot_restructure_a_config_file(client):
+    nid = mknet(client, '10.61.0.0/24')
+    for bad in ['10.0.0.1\ndhcp-option=6,evil', '10.0.0.1 evil', '"quoted"']:
+        r = client.post('/api/dhcp/options',
+                        json={'network_id': nid, 'option': '42', 'value': bad})
+        assert r.status_code == 400, bad
+
+
+def test_router_dns_and_domain_are_refused_as_options(client):
+    """They live on the network row, drive allocation and the deploy payload.
+    A second copy here would drift from the first without anyone noticing."""
+    nid = mknet(client, '10.62.0.0/24', gateway='10.62.0.1')
+    for opt in ('option:router', '3', 'option:dns-server', '6',
+                'option:domain-name', '15'):
+        r = client.post('/api/dhcp/options',
+                        json={'network_id': nid, 'option': opt, 'value': '10.62.0.1'})
+        assert r.status_code == 400, opt
+        assert 'network' in r.json['error']
+
+
+def test_dhcp_options_follow_their_network_when_it_is_deleted(client):
+    from nexusipam.core import db
+    nid = mknet(client, '10.63.0.0/24')
+    client.post('/api/dhcp/options',
+                json={'network_id': nid, 'option': '42', 'value': '10.63.0.5'})
+    assert client.delete('/api/networks/%d' % nid).status_code == 200
+    assert db.query_one('SELECT COUNT(*) c FROM dhcp_options')['c'] == 0
+
+
+def test_dhcp_options_are_in_the_backup_set(client):
+    """A table missing from DUMP_TABLES is silently absent from every backup
+    and every /api/export/json — which only shows up when a restore is tried."""
+    from nexusipam.exports import DUMP_TABLES
+    assert 'dhcp_options' in DUMP_TABLES
+    nid = mknet(client, '10.64.0.0/24')
+    client.post('/api/dhcp/options',
+                json={'network_id': nid, 'option': '42', 'value': '10.64.0.5'})
+    dump = client.get('/api/export/json').get_json()
+    assert len(dump['tables']['dhcp_options']) == 1
+
+
+def test_v3_database_upgrades_in_place(tmp_path, monkeypatch):
+    """Open a real schema-v3 file and confirm v4 lands without touching data
+    and without re-running the v2->v3 name migration."""
+    import sqlite3
+    from nexusipam.core import db as dbmod
+    path = str(tmp_path / 'old.db')
+    conn = sqlite3.connect(path)
+    conn.executescript(dbmod.SCHEMA.replace(
+        # strip the v4 table so the file really is a v3 one
+        dbmod.SCHEMA[dbmod.SCHEMA.index('CREATE TABLE IF NOT EXISTS dhcp_options'):
+                     dbmod.SCHEMA.index('CREATE INDEX IF NOT EXISTS ix_dhcp_options_net')
+                     + len('CREATE INDEX IF NOT EXISTS ix_dhcp_options_net ON dhcp_options(network_id);')],
+        ''))
+    conn.execute("INSERT INTO meta(key,value) VALUES('schema_version','3')")
+    conn.execute("INSERT INTO ip_addresses(address,version,addr_hex,dns_name,meta) "
+                 "VALUES('10.70.0.1',4,'00000000000000000000000000000001','keep.lan','{}')")
+    conn.execute("INSERT INTO ip_names(address_id,name,position,rtype) "
+                 "VALUES(1,'keep.lan',0,'a')")
+    conn.commit()
+    conn.close()
+    assert 'dhcp_options' not in open(path, 'rb').read().decode('latin-1')
+
+    monkeypatch.setattr(dbmod, 'DB_PATH', path)
+    monkeypatch.setattr(dbmod._local, 'conn', None, raising=False)
+    fresh = dbmod.init_db()
+    assert fresh.execute("SELECT value FROM meta WHERE key='schema_version'"
+                         ).fetchone()[0] == '4'
+    fresh.execute('SELECT * FROM dhcp_options')          # table now exists
+    # The address kept its single name — the v3 migration did not run again
+    # and duplicate it.
+    assert fresh.execute('SELECT COUNT(*) FROM ip_names').fetchone()[0] == 1
+    fresh.close()
+    dbmod._local.conn = None
+
+
 # ─── Multi-section push ───────────────────────────────────────────────
 
 def _fake_section(monkeypatch, name, payload):

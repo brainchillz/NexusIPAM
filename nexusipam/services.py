@@ -12,8 +12,9 @@ from flask import Blueprint, jsonify
 from . import netutil
 from .core import db
 from .core.runcmd import num
-from .core.validators import (DHCP_KINDS, DNS_KINDS, DNS_ROLES, RE_LEASE, RE_NAME,
-                              RE_URL, STATUSES, clean_text, is_ip, one_of, valid_fqdn)
+from .core.validators import (DHCP_KINDS, DNS_KINDS, DNS_ROLES, RE_DHCP_OPTION,
+                              RE_DHCP_OPT_VALUE, RE_LEASE, RE_NAME, RE_URL,
+                              STATUSES, clean_text, is_ip, one_of, valid_fqdn)
 from .resource import Resource, register, mount
 
 bp = Blueprint('services', __name__)
@@ -137,6 +138,47 @@ def _v_dhcp_range(data, existing):
             'description': desc}, None
 
 
+# Options the network row already answers. Accepting these here would create a
+# second source of truth for facts the allocator and the deploy payload
+# already read from `networks`, and the two would drift silently.
+RESERVED_OPTIONS = {
+    'option:router': 'the network\'s gateway',
+    '3': 'the network\'s gateway',
+    'option:dns-server': "the network's DNS servers",
+    '6': "the network's DNS servers",
+    'option:domain-name': "the network's domain",
+    '15': "the network's domain",
+}
+
+
+def _v_dhcp_option(data, existing):
+    network_id = num(data.get('network_id'))
+    if network_id is None or not db.query_one('SELECT id FROM networks WHERE id=?',
+                                              (network_id,)):
+        return None, 'A valid network_id is required'
+
+    option = str(data.get('option') or '').strip().lower()
+    if not RE_DHCP_OPTION.match(option):
+        return None, ('Invalid option — use dnsmasq spelling (option:ntp-server) '
+                      'or a bare code (42)')
+    if option in RESERVED_OPTIONS:
+        return None, ('%s is taken from %s — set it on the network itself so the '
+                      'address plan and DHCP cannot disagree'
+                      % (option, RESERVED_OPTIONS[option]))
+
+    value = str(data.get('value') or '').strip()
+    if not RE_DHCP_OPT_VALUE.match(value):
+        return None, ('Invalid option value — letters, digits and . : / , - [ ] '
+                      'only (it is written straight into a config file)')
+
+    desc, e = clean_text(data.get('description'), 'Description')
+    if e:
+        return None, e
+    return {'network_id': network_id, 'option': option, 'value': value,
+            'enabled': 0 if data.get('enabled') is False else 1,
+            'description': desc}, None
+
+
 DHCP_SERVER_SQL = """
 SELECT dhcp_servers.*,
        (SELECT COUNT(*) FROM dhcp_ranges WHERE dhcp_ranges.server_id = dhcp_servers.id)
@@ -153,6 +195,12 @@ LEFT JOIN networks ON networks.id = dhcp_ranges.network_id
 LEFT JOIN dhcp_servers ON dhcp_servers.id = dhcp_ranges.server_id
 """
 
+DHCP_OPTION_SQL = """
+SELECT dhcp_options.*, networks.cidr AS network_cidr, networks.name AS network_name
+FROM dhcp_options
+LEFT JOIN networks ON networks.id = dhcp_options.network_id
+"""
+
 register(Resource('dhcp_servers', 'dhcp_servers', _v_dhcp_server, list_sql=DHCP_SERVER_SQL,
                   get_sql=DHCP_SERVER_SQL + ' WHERE dhcp_servers.id=?',
                   order='dhcp_servers.name'))
@@ -160,10 +208,15 @@ register(Resource('dns_servers', 'dns_servers', _v_dns_server, order='name'))
 register(Resource('dhcp_ranges', 'dhcp_ranges', _v_dhcp_range, list_sql=DHCP_RANGE_SQL,
                   get_sql=DHCP_RANGE_SQL + ' WHERE dhcp_ranges.id=?',
                   order='dhcp_ranges.start_hex', label='start_addr'))
+register(Resource('dhcp_options', 'dhcp_options', _v_dhcp_option, list_sql=DHCP_OPTION_SQL,
+                  get_sql=DHCP_OPTION_SQL + ' WHERE dhcp_options.id=?',
+                  order='dhcp_options.network_id, dhcp_options.option',
+                  label='option', singular='option'))
 
 mount(bp, 'dhcp_servers', '/api/dhcp/servers')
 mount(bp, 'dns_servers', '/api/dns/servers')
 mount(bp, 'dhcp_ranges', '/api/dhcp/ranges')
+mount(bp, 'dhcp_options', '/api/dhcp/options')
 
 
 @bp.route('/api/dhcp/overview')

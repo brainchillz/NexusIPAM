@@ -19,7 +19,8 @@ bp = Blueprint('sync', __name__)
 
 # Every table that carries the source/ext_id integration contract.
 TABLES = ('vlans', 'networks', 'clusters', 'devices', 'vms', 'containers',
-          'ip_addresses', 'dhcp_servers', 'dhcp_ranges', 'dns_servers')
+          'ip_addresses', 'dhcp_servers', 'dhcp_ranges', 'dhcp_options',
+          'dns_servers')
 
 RUNS_KEY = 'sync_runs'
 RUNS_KEEP = 50
