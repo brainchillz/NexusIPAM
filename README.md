@@ -636,12 +636,26 @@ POST /api/audit/prune    admin: {"days": N} or {"all": true} — manual override
 ## Repository conventions
 
 `main` is the publishable branch: no site-specific hostnames, addresses or
-credentials, in files or commit messages. Deployment facts and planning notes
-live under `private/` (gitignored) and on a private-only branch that is never
-pushed to a public remote. Before publishing anything, run
-`tools/check_public_safe.sh` — it validates the tree, every commit message and
-the full history of the current branch against your own (uncommitted) term
-list.
+credentials, in files or commit messages.
+
+Anything site-specific belongs in **your own private infrastructure repo** —
+one with no public remote at all — not in a branch of this one. A branch is a
+`git push` typo away from the wrong place; a separate private repo is not.
+
+What stays here is the one thing that cannot live elsewhere: the term list at
+`private/forbidden-terms.txt`, on a never-published `private` branch. Before
+publishing, run `tools/check_public_safe.sh` — it reads that list (out of the
+branch, so you can stay on `main`) and validates the tree, every commit
+message and the full history against it. If the guard depended on a sibling
+repo being checked out, a missing checkout would silently disarm it.
+
+It **fails closed**, which is the whole point of running it:
+
+```
+exit 0   checked, clean
+exit 1   forbidden terms found — do not push
+exit 2   could not check (no term list) — do not treat as clean
+```
 
 ## Development
 

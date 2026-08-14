@@ -3,17 +3,22 @@
 # historical blob contains a term from private/forbidden-terms.txt (one
 # case-insensitive regex per line, '#' comments allowed).
 #
-# The term list is deliberately NOT committed — publishing a list of the
-# identifiers you must never publish would defeat the point. Run this before
-# any push to a public remote; without the list file there is nothing to
-# check and it exits clean, so public clones are unaffected.
+# The term list is deliberately NOT on this branch — publishing a list of the
+# identifiers you must never publish would defeat the point. It lives on the
+# never-published `private` branch and is read straight out of it.
+#
+# FAILS CLOSED (exit 2). If the list cannot be loaded this refuses instead of
+# reporting success: a guard that passes because its rule file went missing is
+# worse than no guard, because it is the one people trust before pushing. A
+# clone that genuinely has nothing to protect can set ALLOW_MISSING_TERM_LIST=1.
+#
+#   exit 0  checked, clean      exit 1  forbidden terms found
+#   exit 2  could not check     (never confuse this with clean)
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 LIST="private/forbidden-terms.txt"
-# The term list lives on the (never-published) private branch. Checking out
-# main removes the working-tree copy — tracked there, absent here — so fall
-# back to reading it straight out of that branch. A guard that silently
-# passes because its rule file went missing is worse than no guard.
+# Checking out main removes the working-tree copy — tracked on `private`,
+# absent here — so fall back to reading it out of that branch.
 if [ -f "$LIST" ]; then
     TERMS=$(cat "$LIST")
 elif git rev-parse -q --verify private >/dev/null; then
@@ -21,13 +26,24 @@ elif git rev-parse -q --verify private >/dev/null; then
 else
     TERMS=""
 fi
-if [ -z "$TERMS" ]; then
-    echo "no term list found (private/forbidden-terms.txt in the working tree"
-    echo "or on the 'private' branch) — nothing to check"
+PATTERN=""
+if [ -n "$TERMS" ]; then
+    # `|| true`: a list of nothing but comments makes grep exit 1, which under
+    # `set -e` would abort here instead of reaching the check below.
+    PATTERN=$(printf '%s\n' "$TERMS" | grep -v '^\s*#' | grep -v '^\s*$' \
+              | paste -sd'|' - || true)
+fi
+if [ -z "$PATTERN" ]; then
+    echo "CANNOT CHECK: $LIST is missing or defines no patterns (looked in the"
+    echo "working tree and on the 'private' branch)."
+    if [ "${ALLOW_MISSING_TERM_LIST:-0}" != 1 ]; then
+        echo "Refusing to report a clean tree from rules that were never loaded."
+        echo "If this clone has nothing to protect: ALLOW_MISSING_TERM_LIST=1 $0"
+        exit 2
+    fi
+    echo "ALLOW_MISSING_TERM_LIST=1 set — skipping the check by request."
     exit 0
 fi
-PATTERN=$(printf '%s\n' "$TERMS" | grep -v '^\s*#' | grep -v '^\s*$' | paste -sd'|' -)
-[ -n "$PATTERN" ] || { echo "empty term list"; exit 0; }
 
 fail=0
 if git grep -I -i -n -E "$PATTERN" -- . >/tmp/pubcheck.$$ 2>/dev/null; then
