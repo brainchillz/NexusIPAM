@@ -428,6 +428,11 @@ def target_pull(name):
             peer = dict(target)
             peer['verify'] = target.get('verify') or 'insecure'
             state = unifi.read_state(peer)
+        elif kind == 'pihole':
+            return err('Adoption from a Pi-hole is not built yet — its config '
+                       'carries a netmask, so this is feasible; for now record '
+                       'the scope in the plan and push, which is the direction '
+                       'a test instance wants anyway', 400)
         elif target.get('read_token'):
             state = read_dnsmaq_state(target)
         else:

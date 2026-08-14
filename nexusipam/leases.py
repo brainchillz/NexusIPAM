@@ -101,11 +101,13 @@ def read_target_leases(target):
     """Leases from one push target, whichever kind it is. Returns None for a
     target with no read path (a dnsmaq node without a read token) — distinct
     from an empty lease table, which is a real observation."""
-    if (target.get('kind') or 'dnsmaq') == 'unifi':
-        from . import unifi
+    kind = target.get('kind') or 'dnsmaq'
+    if kind in ('unifi', 'pihole'):
+        from . import pihole, unifi
         peer = dict(target)
         peer['verify'] = target.get('verify') or 'insecure'
-        return unifi.read_leases(peer)
+        adapter = unifi if kind == 'unifi' else pihole
+        return adapter.read_leases(peer)
     if target.get('read_token'):
         return read_dnsmaq_leases(target)
     return None

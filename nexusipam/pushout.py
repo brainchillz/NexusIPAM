@@ -42,16 +42,34 @@ HASHES_KEY = 'push_hashes'          # per-section content hash behind the serial
 SOURCE_NAME = 'nexus-ipam'          # how this IPAM identifies itself to nodes
 PUSH_TIMEOUT = 30
 
-# Two kinds of target:
+# Kinds of target:
 #   'dnsmaq' — a DNSMAQ-MGR node, which receives the mirror payload on its own
 #     API and locks each pushed section read-only.
 #   'unifi'  — a UniFi Cloud Gateway, which has no mirror endpoint: its state
 #     is reconciled object by object by the unifi adapter. Push-only; there is
 #     nothing to lock, so the gateway's UI stays editable and drift is possible.
-# Reaching the gateway directly (rather than via a DNSMAQ-MGR node re-pushing
-# downstream) is the same rule already applied to ns1/ns2: every target is
-# pushed independently, so no target's freshness depends on another being up.
-KINDS = ('dnsmaq', 'unifi')
+#   'pihole' — a Pi-hole (v6 API): dns.hosts and the dhcp.* config reconciled
+#     by the pihole adapter. Same reconcile model as 'unifi'.
+# Reaching every target directly is the standing rule: no target's freshness
+# depends on another being up.
+KINDS = ('dnsmaq', 'unifi', 'pihole')
+
+# Reconciling kinds (no mirror endpoint) -> adapter module. Both adapters
+# share the summary schema, status_line, and the syncer registry contract, so
+# the push path treats them identically.
+ADAPTER_KINDS = {'unifi': 'unifi', 'pihole': 'pihole'}
+
+# The credential/flag fields each kind owns. Switching a target's kind must
+# not leave another kind's secrets sitting in the store for a target that can
+# no longer use them, so on save everything NOT of the new kind is popped.
+KIND_FIELDS = {
+    'dnsmaq': ('token', 'read_token'),
+    'unifi': ('unifi_username', 'unifi_password', 'unifi_site',
+              'unifi_delete_extra', 'unifi_claim_client_dns',
+              'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'),
+    'pihole': ('pihole_password', 'pihole_delete_extra',
+               'pihole_dhcp_delete_extra', 'pihole_manage_scope_state'),
+}
 
 # Which sections each kind can carry. A UniFi gateway serves both DNS and
 # DHCP and its API exposes both (rest/networkconf holds the dhcpd_* scope
@@ -60,10 +78,11 @@ KINDS = ('dnsmaq', 'unifi')
 # scope rather than anything about UniFi.
 KIND_SECTIONS = {
     # netboot is dnsmaq-only: on a UniFi gateway PXE rides inside the dhcp
-    # section as dhcpd_boot_* fields, and carrying it twice would let the two
-    # copies disagree.
+    # section as dhcpd_boot_* fields (and a Pi-hole has no netboot model at
+    # all) — carrying it twice would let the copies disagree.
     'dnsmaq': ('hosts', 'dhcp', 'netboot'),
     'unifi': ('hosts', 'dhcp'),
+    'pihole': ('hosts', 'dhcp'),
 }
 
 # DNSMAQ-MGR record ids (h_xxxxxx) — only ids of this shape survive its
@@ -349,7 +368,8 @@ def _public(t):
     out.setdefault('kind', 'dnsmaq')
     out['sections'] = sections_for(t)
     out['has_token'] = bool(out.pop('token', ''))
-    out['has_password'] = bool(out.pop('unifi_password', ''))
+    out['has_password'] = bool(out.pop('unifi_password', '')
+                               or out.pop('pihole_password', ''))
     out['has_read_token'] = bool(out.pop('read_token', ''))
     return out
 
@@ -390,9 +410,14 @@ def dnsmaq_get(target, path):
         return json.loads(r.read() or b'{}')
 
 
-def _push_unifi(target, data):
-    """Reconcile a gateway's state against ours, section by section.
-    Returns (ok, detail).
+def _adapter_for(kind):
+    from importlib import import_module
+    return import_module('.' + ADAPTER_KINDS[kind], __package__)
+
+
+def _push_reconcile(target, data):
+    """Reconcile an adapter-kind target's state against ours, section by
+    section. Returns (ok, detail).
 
     Unlike a mirror push — one request, applied or refused whole — this is
     list/diff/N-writes, so individual records can fail while the rest land.
@@ -400,15 +425,15 @@ def _push_unifi(target, data):
     client DNS holds x at y" is the kind of thing an operator has to see to
     act on.
     """
-    from . import unifi
+    adapter = _adapter_for(target.get('kind'))
     peer = dict(target)
     # A target saved before `verify` existed has no key at all, and the
-    # adapter's own default is 'system' — which would fail against the
-    # gateway's self-signed cert. Match this module's default instead.
+    # adapters' own default is 'system' — which would fail against a
+    # self-signed cert. Match this module's default instead.
     peer['verify'] = target.get('verify') or 'insecure'
     parts, ok = [], True
     for section, payload in data.items():
-        syncer = unifi.syncer_for(section)
+        syncer = adapter.syncer_for(section)
         if syncer is None:
             continue
         try:
@@ -424,7 +449,7 @@ def _push_unifi(target, data):
         line = ', '.join(bits)
         if s['failed'] or s['conflicts']:
             ok = False
-            line = '%s (%s)' % (unifi.status_line(s), line)
+            line = '%s (%s)' % (adapter.status_line(s), line)
         parts.append('%s: %s' % (section, line) if len(data) > 1 else line)
     if not parts:
         return True, 'nothing to sync'
@@ -434,8 +459,8 @@ def _push_unifi(target, data):
 def push_target(target, data, serials):
     """One push to one target. `data` is {section: payload}, `serials` the
     matching {section: n}. Returns (ok, detail)."""
-    if target.get('kind') == 'unifi':
-        return _push_unifi(target, data)
+    if target.get('kind') in ADAPTER_KINDS:
+        return _push_reconcile(target, data)
     verify = target.get('verify') or 'insecure'
     if verify.startswith('fingerprint:'):
         e = _check_fingerprint(target['url'], verify.split(':', 1)[1])
@@ -525,9 +550,13 @@ def push_target_save():
             return err('Invalid URL (https://host[:port])')
         t['url'] = url
 
+    # Drop every field belonging to a kind this target no longer is.
+    for other, fields in KIND_FIELDS.items():
+        if other != kind:
+            for k in fields:
+                t.pop(k, None)
+
     if kind == 'unifi':
-        t.pop('token', None)                    # gateways authenticate as a user
-        t.pop('read_token', None)               # dnsmaq-side credential
         username, e = clean_text(data.get('unifi_username'), 'Gateway username', 64)
         if e:
             return err(e)
@@ -556,14 +585,22 @@ def push_target_save():
                      'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'):
             if flag in data or not cur:
                 t[flag] = bool(data.get(flag))
+    elif kind == 'pihole':
+        if data.get('pihole_password'):         # omitted = keep stored password
+            password = str(data['pihole_password'])
+            if len(password) > 256:
+                return err('Pi-hole password is too long (max 256 characters)')
+            t['pihole_password'] = password
+        if not t.get('pihole_password'):
+            return err('The Pi-hole app/web password is required '
+                       '(the web interface password, or an app password)')
+        # Same blast-radius defaults as the gateway flags: nothing destructive
+        # happens because someone added a target and pressed save.
+        for flag in ('pihole_delete_extra', 'pihole_dhcp_delete_extra',
+                     'pihole_manage_scope_state'):
+            if flag in data or not cur:
+                t[flag] = bool(data.get(flag))
     else:
-        # Switching a target away from 'unifi' must not leave the gateway's
-        # admin password sitting in the store for a target that can no longer
-        # use it.
-        for k in ('unifi_username', 'unifi_password', 'unifi_site',
-                  'unifi_delete_extra', 'unifi_claim_client_dns',
-                  'unifi_dhcp_delete_extra', 'unifi_manage_scope_state'):
-            t.pop(k, None)
         if data.get('token'):                   # omitted = keep stored token
             t['token'] = str(data['token']).strip()
         if not t.get('token'):
@@ -643,9 +680,68 @@ def push_target_delete(name):
 # planners the push executes — computed writes, performed nowhere.
 
 def run_drift(target, client=None):
-    """Read-only drift report for one unifi target: for each subscribed
+    """Read-only drift report for one reconciling target: for each subscribed
     section, what a push right now would have to change. Raises on an
-    unreachable/refusing gateway; the route wraps that."""
+    unreachable/refusing server; the route wraps that."""
+    if target.get('kind') == 'pihole':
+        return _drift_pihole(target, client)
+    return _drift_unifi(target, client)
+
+
+def _drift_pihole(target, client=None):
+    from . import pihole
+    peer = dict(target)
+    peer['verify'] = target.get('verify') or 'insecure'
+    data = build_sections(sections_for(target))
+    report = {'ts': db.now(), 'ok': True, 'sections': {}}
+    own = client is None
+    if own:
+        session = pihole.HttpsSession(peer['url'], peer['verify'])
+        client = pihole.PiholeClient(session)
+        client.login(peer.get('pihole_password') or '')
+    try:
+        cfg = client.get_config()
+        if 'hosts' in data:
+            p = pihole.plan_hosts(pihole.records_from_hosts(data['hosts']),
+                                  (cfg.get('dns') or {}).get('hosts') or [],
+                                  mirror=bool(peer.get('pihole_delete_extra')))
+            counts = {'missing': p['created'], 'differs': p['updated'],
+                      'extra': p['deleted'],
+                      # A pure ordering difference is real drift: the PTR
+                      # answer is the first matching hosts line.
+                      'reordered': 1 if p['changed'] and not (
+                          p['created'] or p['updated'] or p['deleted']) else 0}
+            report['sections']['hosts'] = {'drifted': any(counts.values()),
+                                           'in_step': p['unchanged'],
+                                           'counts': counts, 'examples': []}
+        if 'dhcp' in data:
+            own_ip = pihole.split_url(peer['url'])[0]
+            p = pihole.plan_dhcp(data['dhcp'], cfg.get('dhcp') or {}, own_ip,
+                                 mirror=bool(peer.get('pihole_dhcp_delete_extra')),
+                                 manage_state=bool(peer.get('pihole_manage_scope_state')))
+            scope_fields = sorted(k for k in (p['patch'] or {}) if k != 'hosts')
+            counts = {'scope_fields': len(scope_fields),
+                      'reservations_missing': p['created'],
+                      'reservations_differ': p['updated'],
+                      'reservations_extra': p['deleted'],
+                      'unsupported': len(p['conflicts']),
+                      'other_scopes': len(p['skipped'])}
+            # Structural facts — options Pi-hole cannot express, scopes it
+            # cannot serve — must not paint the target permanently red.
+            actionable = {k: v for k, v in counts.items()
+                          if k not in ('unsupported', 'other_scopes')}
+            report['sections']['dhcp'] = {'drifted': any(actionable.values()),
+                                          'in_step': p['unchanged'],
+                                          'counts': counts,
+                                          'examples': ['scope %s differs' % k
+                                                       for k in scope_fields][:6]}
+        return report
+    finally:
+        if own:
+            client.logout()
+
+
+def _drift_unifi(target, client=None):
     from . import unifi
     peer = dict(target)
     peer['verify'] = target.get('verify') or 'insecure'
@@ -709,11 +805,11 @@ def push_target_drift(name):
     target = next((t for t in targets if t['name'] == name), None)
     if not target:
         return err('No such target', 404)
-    if (target.get('kind') or 'dnsmaq') != 'unifi':
+    if (target.get('kind') or 'dnsmaq') == 'dnsmaq':
         return err('A DNSMAQ-MGR node locks every pushed section read-only, so '
                    'it cannot drift — the serial column already answers "is it '
-                   'current?". Only a gateway, whose own UI stays editable, '
-                   'needs this check.', 400)
+                   'current?". Only a reconciled target, whose own UI stays '
+                   'editable, needs this check.', 400)
     try:
         report = run_drift(target)
     except Exception as e:                    # unreachable, login refused, …

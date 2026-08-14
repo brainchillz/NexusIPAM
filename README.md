@@ -616,6 +616,16 @@ Two kinds of target:
   fields on its network objects plus fixed-IP client bindings. Authenticated
   as a local gateway admin with MFA disabled, since the API refuses a 2FA
   login.
+- **Pi-hole (v6 API)** — reconciled like the gateway, against its config:
+  `hosts` records become `dns.hosts` lines (ours first, so the PTR answer —
+  the first matching hosts line — follows the plan's canonical ordering;
+  foreign entries are kept unless *delete extra* is on), and `dhcp` maps
+  onto the `dhcp.*` keys with reservations as literal dnsmasq `dhcp-host`
+  strings. A Pi-hole serves exactly **one** scope — the subnet it lives on —
+  so the plan's other scopes are counted as skipped, options it cannot
+  express (DNS handed out, NTP, PXE, …) are reported as conflicts rather
+  than silently dropped, and its DHCP server's on/off state is never touched
+  without the explicit opt-in. Authenticated with the web/app password.
 
 Every target is pushed **independently**, carrying one content-versioned
 serial per section — no target's freshness depends on another being

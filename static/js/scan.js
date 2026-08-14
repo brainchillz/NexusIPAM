@@ -101,7 +101,7 @@ function leaseOverlaySection(lv, push) {
   // Readable targets: any gateway, plus DNSMAQ-MGR nodes that carry a
   // read token (their mirror token is write-only by design).
   const targets = ((push && push.targets) || [])
-    .filter(t => t.kind === 'unifi' || t.has_read_token);
+    .filter(t => t.kind === 'unifi' || t.kind === 'pihole' || t.has_read_token);
   const conflicts = (lv.leases || []).filter(l => l.conflict);
   const planCell = l => {
     if (l.conflict) {

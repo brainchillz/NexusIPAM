@@ -2296,6 +2296,136 @@ def test_netboot_section_renders_from_the_pxe_options(client):
     assert r.status_code == 400 and 'cannot carry' in r.json['error']
 
 
+# ─── Pi-hole adapter ──────────────────────────────────────────────────
+
+def test_pihole_plan_hosts_is_additive_and_ptr_ordered():
+    """dns.hosts is replaced wholesale, so additive means folding foreign
+    entries back in — AFTER ours, because the PTR answer is the first
+    matching hosts line and the plan's canonical order must win."""
+    from nexusipam import pihole
+    desired = [('web.lan', 'A', '10.0.0.5'), ('alias.lan', 'A', '10.0.0.5')]
+    current = ['10.0.0.9 printer.lan',        # foreign — kept
+               '10.0.0.4 web.lan']            # ours, wrong address — updated
+    p = pihole.plan_hosts(desired, current)
+    assert p['lines'] == ['10.0.0.5 web.lan', '10.0.0.5 alias.lan',
+                          '10.0.0.9 printer.lan']
+    assert (p['created'], p['updated'], p['deleted'], p['kept']) == (1, 1, 0, 1)
+    # Mirroring drops the foreign entry instead.
+    p = pihole.plan_hosts(desired, current, mirror=True)
+    assert p['lines'] == ['10.0.0.5 web.lan', '10.0.0.5 alias.lan']
+    assert p['deleted'] == 1
+    # In-step content in the right order changes nothing.
+    p = pihole.plan_hosts(desired, ['10.0.0.5 web.lan', '10.0.0.5 alias.lan'])
+    assert not p['changed'] and p['unchanged'] == 2
+
+
+def test_pihole_plan_dhcp_serves_one_scope_and_reports_the_rest():
+    """A Pi-hole leases only the subnet it lives on: the matching scope's
+    fields map onto dhcp.*, other scopes are skipped, options it cannot
+    express become conflicts, and `active` is untouched without the opt-in —
+    turning a DHCP server on or off is not a config tweak."""
+    from nexusipam import pihole
+    payload = {
+        'ranges': [{'start': '10.0.0.100', 'end': '10.0.0.200',
+                    'netmask': '255.255.255.0', 'lease': '24h', 'tag': 'lan',
+                    'enabled': True},
+                   {'start': '10.9.0.10', 'end': '10.9.0.90',
+                    'netmask': '255.255.255.0', 'lease': '12h', 'tag': 'other',
+                    'enabled': True}],
+        'options': [{'tag': 'lan', 'option': 'option:router', 'value': '10.0.0.1'},
+                    {'tag': 'lan', 'option': 'option:dns-server', 'value': '10.0.0.53'},
+                    {'tag': 'lan', 'option': 'option:ntp-server', 'value': '10.0.0.5'}],
+        'static_leases': [
+            {'mac': 'aa:bb:cc:00:82:01', 'ip': '10.0.0.10', 'hostname': 'nas'},
+            {'mac': 'aa:bb:cc:00:82:02', 'ip': '10.9.0.10', 'hostname': 'far'}],
+    }
+    cfg = {'active': False, 'start': '', 'end': '', 'router': '', 'netmask': '',
+           'leaseTime': '', 'hosts': ['ee:ee:ee:ee:ee:01,10.0.0.77,foreign']}
+    p = pihole.plan_dhcp(payload, cfg, own_ip='10.0.0.2')
+    assert p['skipped'] == ['10.9.0.0/24']
+    assert p['skipped_reservations'] == 1
+    patch = p['patch']
+    assert patch['start'] == '10.0.0.100' and patch['end'] == '10.0.0.200'
+    assert patch['router'] == '10.0.0.1' and patch['netmask'] == '255.255.255.0'
+    assert patch['leaseTime'] == '24h'
+    assert 'active' not in patch                      # opt-in only
+    # Ours written first, the foreign reservation folded back in.
+    assert patch['hosts'] == ['aa:bb:cc:00:82:01,10.0.0.10,nas',
+                              'ee:ee:ee:ee:ee:01,10.0.0.77,foreign']
+    assert {c[0] for c in p['conflicts']} == {'option:dns-server',
+                                              'option:ntp-server'}
+
+    p = pihole.plan_dhcp(payload, cfg, own_ip='10.0.0.2',
+                         mirror=True, manage_state=True)
+    assert p['patch']['active'] is True
+    assert p['patch']['hosts'] == ['aa:bb:cc:00:82:01,10.0.0.10,nas']
+    assert p['deleted'] == 1
+
+
+def test_pihole_target_push_drift_and_leases(client, monkeypatch):
+    from nexusipam import pihole, pushout
+    # netboot has no Pi-hole model — refused at subscription time.
+    r = client.post('/api/push/targets',
+                    json={'name': 'ph', 'kind': 'pihole', 'url': 'https://ph:8453',
+                          'sections': ['netboot'], 'pihole_password': 'pw'})
+    assert r.status_code == 400 and 'cannot carry' in r.json['error']
+    # The password is required, stored, and only ever reported as a boolean.
+    assert client.post('/api/push/targets',
+                       json={'name': 'ph', 'kind': 'pihole',
+                             'url': 'https://ph:8453'}).status_code == 400
+    r = client.post('/api/push/targets',
+                    json={'name': 'ph', 'kind': 'pihole', 'url': 'https://ph:8453',
+                          'sections': ['hosts', 'dhcp'], 'pihole_password': 'pw'})
+    assert r.json['target']['has_password'] is True
+    assert 'pihole_password' not in r.json['target']
+
+    nid = mknet(client, '10.82.0.0/24')
+    _mk_addr(client, '10.82.0.5', dns_name='ph-test.lan')
+    client.post('/api/dhcp/ranges',
+                json={'network_id': nid, 'start_addr': '10.82.0.100',
+                      'end_addr': '10.82.0.200'})
+    seen = []
+    monkeypatch.setattr(pihole, 'sync_hosts',
+                        lambda peer, hosts, client=None: (seen.append(len(hosts)),
+                            {'created': 1, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                             'unchanged': 0, 'covered': 0, 'conflicts': [],
+                             'failed': 0, 'errors': []})[1])
+    monkeypatch.setattr(pihole, 'sync_dhcp',
+                        lambda peer, payload, client=None:
+                            {'created': 0, 'updated': 0, 'deleted': 0, 'claimed': 0,
+                             'unchanged': 1, 'covered': 0, 'conflicts': [],
+                             'failed': 0, 'errors': []})
+    out, e = pushout.run_push('ph')
+    assert e is None and out['success'] and seen == [1]
+
+    # Drift reads the config once and runs the same pure planners.
+    class FakeClient:
+        def get_config(self):
+            return {'dns': {'hosts': []},
+                    'dhcp': {'active': False, 'hosts': []}}
+
+    target = next(t for t in pushout._targets() if t['name'] == 'ph')
+    report = pushout.run_drift(target, client=FakeClient())
+    assert report['sections']['hosts']['drifted']
+    assert report['sections']['hosts']['counts']['missing'] == 1
+    assert report['sections']['dhcp']['counts']['other_scopes'] == 1
+
+    # Lease reading skips reservation-held MACs, like every other adapter.
+    class LeaseClient(FakeClient):
+        def get_config(self):
+            return {'dhcp': {'hosts': ['aa:bb:cc:00:82:09,10.82.0.9,resv']}}
+
+        def leases(self):
+            return [{'ip': '10.82.0.30', 'hwaddr': 'AA:BB:CC:00:82:30',
+                     'name': 'dyn', 'expires': 123},
+                    {'ip': '10.82.0.9', 'hwaddr': 'aa:bb:cc:00:82:09',
+                     'name': 'resv', 'expires': 123}]
+
+    out = pihole.read_leases({'url': 'https://ph:8453'}, client=LeaseClient())
+    assert out == [{'ip': '10.82.0.30', 'mac': 'aa:bb:cc:00:82:30',
+                    'hostname': 'dyn', 'expires': 123}]
+
+
 def test_drift_reads_the_gateway_back_and_diffs(client, monkeypatch):
     """Serials say a target ACKED the content; drift says whether it still
     HOLDS it. Same pure planners as the push, executed on nothing."""

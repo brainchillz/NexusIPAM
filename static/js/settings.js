@@ -82,10 +82,15 @@ async function page_settings() {
     </div>
     ${dataTable([
       {label: 'Target', get: t => `<strong>${escapeHtml(t.name)}</strong><br><span class="muted">${escapeHtml(t.url || '')}</span>`},
-      {label: 'Type', get: t => `${t.kind === 'unifi'
-        ? `<span class="status-badge">UniFi gateway</span>${t.unifi_delete_extra
-             ? '<br><span class="muted">authoritative</span>' : '<br><span class="muted">additive</span>'}`
-        : '<span class="status-badge">DNSMAQ-MGR</span>'}`},
+      {label: 'Type', get: t => {
+        if (t.kind === 'unifi') {
+          return `<span class="status-badge">UniFi gateway</span><br><span class="muted">${t.unifi_delete_extra ? 'authoritative' : 'additive'}</span>`;
+        }
+        if (t.kind === 'pihole') {
+          return `<span class="status-badge">Pi-hole</span><br><span class="muted">${t.pihole_delete_extra ? 'authoritative' : 'additive'}</span>`;
+        }
+        return '<span class="status-badge">DNSMAQ-MGR</span>';
+      }},
       {label: 'Sections held', get: t => sectionBadges(t, push)},
       {label: 'Enabled', get: t => t.enabled ? '<span class="status-badge green">yes</span>' : '<span class="status-badge gray">no</span>'},
       {label: 'Last push', get: t => t.last
@@ -96,11 +101,11 @@ async function page_settings() {
       {label: '', cls: 'row-actions', get: t => `
         <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
         <button class="btn btn-sm btn-outline" onclick="pushTargetModal('${jsArg(t.name)}')">Edit</button>
-        ${t.kind === 'unifi' ? `<button class="btn btn-sm btn-outline"
-          title="Read the gateway back and diff it against the plan — read-only"
-          onclick="driftCheck('${jsArg(t.name)}', this)">Drift</button>
-        <button class="btn btn-sm btn-outline"
-          title="Read this gateway's networks, DHCP scopes, options and reservations into the plan"
+        ${t.kind !== 'dnsmaq' ? `<button class="btn btn-sm btn-outline"
+          title="Read this server back and diff it against the plan — read-only"
+          onclick="driftCheck('${jsArg(t.name)}', this)">Drift</button>` : ''}
+        ${t.kind === 'unifi' || (t.kind === 'dnsmaq' && t.has_read_token) ? `<button class="btn btn-sm btn-outline"
+          title="Read this server's networks, DHCP scopes, options and reservations into the plan"
           onclick="pullTargetModal('${jsArg(t.name)}')">Adopt…</button>` : ''}
         <button class="btn btn-sm btn-danger" onclick="pushTargetDelete('${jsArg(t.name)}','${jsArg(t.kind || 'dnsmaq')}')">Remove</button>`},
     ], push.targets || [], 'No push targets — this IPAM is not yet writing DNS anywhere')}` : ''}
@@ -440,7 +445,7 @@ function lastSerials(last) {
 // it still HOLDS it. Only a gateway can drift — a DNSMAQ-MGR node locks its
 // pushed sections read-only, which is why its cell is a statement, not a check.
 function driftCell(t) {
-  if (t.kind !== 'unifi') {
+  if (t.kind === 'dnsmaq') {
     return '<span class="muted" title="Pushed sections lock read-only on the node, so its state cannot walk away">locked on node</span>';
   }
   const d = t.drift;
@@ -480,6 +485,7 @@ function pushTargetModal(name) {
       <select id="pt-kind" class="form-control" onchange="pushTargetKind()" ${cur ? 'disabled' : ''}>
         <option value="dnsmaq" ${kind === 'dnsmaq' ? 'selected' : ''}>DNSMAQ-MGR node (mirror push)</option>
         <option value="unifi" ${kind === 'unifi' ? 'selected' : ''}>UniFi Cloud Gateway (direct reconcile)</option>
+        <option value="pihole" ${kind === 'pihole' ? 'selected' : ''}>Pi-hole (v6 API, direct reconcile)</option>
       </select></div>
     <div class="form-group"><label>Name</label>
       <input id="pt-name" class="form-control" placeholder="ns1" autocomplete="off"
@@ -551,15 +557,37 @@ function pushTargetModal(name) {
         <em>off</em>, which is an outage, not a config tweak. They apply only when this target
         receives the <code>dhcp</code> section.</p>
     </div>
+    <div id="pt-pihole" style="display:none">
+      <div class="form-group"><label>Pi-hole password (web interface password, or an app password)</label>
+        <input id="pt-ph-pass" class="form-control" type="password" autocomplete="new-password"
+          placeholder="${cur && cur.has_password && kind === 'pihole' ? '(unchanged — leave empty to keep the stored password)' : ''}"></div>
+      <label class="checkitem" style="padding-left:0"><input id="pt-ph-delextra" type="checkbox"
+        ${cur && cur.pihole_delete_extra ? 'checked' : ''}>
+        Delete local DNS records this IPAM did not create</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-ph-dhcp-delextra" type="checkbox"
+        ${cur && cur.pihole_dhcp_delete_extra ? 'checked' : ''}>
+        Withdraw DHCP reservations the plan does not list</label>
+      <label class="checkitem" style="padding-left:0"><input id="pt-ph-scope-state" type="checkbox"
+        ${cur && cur.pihole_manage_scope_state ? 'checked' : ''}>
+        Manage the DHCP server's on/off state</label>
+      <p class="help">A Pi-hole serves <strong>one</strong> DHCP scope — the subnet it lives on;
+        the plan's other scopes are reported as skipped, and options it cannot express (DNS handed
+        out, NTP, PXE, …) are reported as conflicts rather than silently dropped. All three flags
+        default off: the first two make this IPAM authoritative over its local records and
+        reservations, and the third can turn its DHCP server on or off — with the plan's
+        <code>enabled</code> flag deciding which.</p>
+    </div>
     <button class="btn" onclick="pushTargetSave()">${cur ? 'Save' : 'Add target'}</button>`);
   pushTargetKind();
 }
 
 function pushTargetKind() {
-  const unifi = $('pt-kind').value === 'unifi';
-  $('pt-unifi').style.display = unifi ? '' : 'none';
-  $('pt-dnsmaq').style.display = unifi ? 'none' : '';
-  $('pt-url').placeholder = unifi ? 'https://192.168.1.1' : 'https://dns-node:8443';
+  const kind = $('pt-kind').value;
+  $('pt-unifi').style.display = kind === 'unifi' ? '' : 'none';
+  $('pt-pihole').style.display = kind === 'pihole' ? '' : 'none';
+  $('pt-dnsmaq').style.display = kind === 'dnsmaq' ? '' : 'none';
+  $('pt-url').placeholder = {unifi: 'https://192.168.1.1',
+                             pihole: 'https://pihole-host:443'}[kind] || 'https://dns-node:8443';
 }
 
 async function pushTargetSave() {
@@ -581,6 +609,11 @@ async function pushTargetSave() {
     body.unifi_claim_client_dns = $('pt-claim').checked;
     body.unifi_dhcp_delete_extra = $('pt-dhcp-delextra').checked;
     body.unifi_manage_scope_state = $('pt-scope-state').checked;
+  } else if (kind === 'pihole') {
+    if ($('pt-ph-pass').value) body.pihole_password = $('pt-ph-pass').value;
+    body.pihole_delete_extra = $('pt-ph-delextra').checked;
+    body.pihole_dhcp_delete_extra = $('pt-ph-dhcp-delextra').checked;
+    body.pihole_manage_scope_state = $('pt-ph-scope-state').checked;
   } else {
     if ($('pt-token').value.trim()) body.token = $('pt-token').value.trim();
     if ($('pt-read').value.trim()) body.read_token = $('pt-read').value.trim();
