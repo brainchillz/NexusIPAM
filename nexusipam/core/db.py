@@ -38,7 +38,7 @@ _local = threading.local()
 # sequences from interleaving.
 WRITE_LOCK = threading.RLock()
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Objects an IP address can be assigned to. Polymorphic by design — a SQL FK
 # cannot point at four tables — so the app layer validates the target exists
@@ -194,6 +194,13 @@ CREATE TABLE IF NOT EXISTS ip_addresses (
   if_name       TEXT NOT NULL DEFAULT '',
   mac           TEXT NOT NULL DEFAULT '',
   is_primary    INTEGER NOT NULL DEFAULT 0,
+  -- "A DHCP server hands this address to this MAC." Deliberately NOT a
+  -- `status`: a reservation says how an address is DELIVERED, while status
+  -- says what it is FOR, and a live host with a fixed lease is both active
+  -- and reserved. Folding the two loses that, and an operator correcting the
+  -- status back to `active` would silently stop the reservation being
+  -- published.
+  is_reservation INTEGER NOT NULL DEFAULT 0,
   dns_name      TEXT NOT NULL DEFAULT '',
   description   TEXT NOT NULL DEFAULT '',
   source        TEXT NOT NULL DEFAULT 'manual',
@@ -392,6 +399,7 @@ def connect():
 # only, which is all a single-file database at this scale ever needs.
 MIGRATIONS = [
     ('devices', 'tags', "TEXT NOT NULL DEFAULT ''"),
+    ('ip_addresses', 'is_reservation', 'INTEGER NOT NULL DEFAULT 0'),
 ]
 
 
@@ -430,6 +438,15 @@ def _migrate_names(conn):
             pos += 1
 
 
+def _migrate_reservations(conn):
+    """v5 -> v6: seed is_reservation from what the flag used to be inferred
+    from — an address held for a specific MAC. Preserves exactly what the
+    renderers published before the column existed, so an upgrade changes
+    nothing until someone edits a record."""
+    conn.execute("UPDATE ip_addresses SET is_reservation=1 "
+                 "WHERE mac <> '' AND status = 'reserved'")
+
+
 def init_db():
     conn = connect()
     prev = conn.execute("SELECT value FROM meta WHERE key='schema_version'"
@@ -439,6 +456,8 @@ def init_db():
     _migrate(conn)
     if prev is not None and int(prev[0]) < 3:
         _migrate_names(conn)
+    if prev is not None and int(prev[0]) < 6:
+        _migrate_reservations(conn)
     conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                  (str(SCHEMA_VERSION),))

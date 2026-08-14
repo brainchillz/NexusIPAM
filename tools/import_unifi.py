@@ -347,6 +347,11 @@ def main():
         print('\n%d fixed-IP reservation(s)' % len(fixed))
         for u in fixed:
             body = {'address': u['fixed_ip'], 'status': 'reserved',
+                    # The gateway is the authority on this: it hands this
+                    # address to this MAC. Asserted even when merging into a
+                    # record another importer created first, or the plan can
+                    # never publish the reservation back.
+                    'is_reservation': True,
                     'mac': u.get('mac', ''),
                     'dns_name': '', 'description': 'UniFi DHCP reservation: %s'
                                                    % (u.get('name') or u.get('hostname') or ''),

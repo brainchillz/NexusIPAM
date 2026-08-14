@@ -89,6 +89,7 @@ def _v_address(data, existing):
             'network_id': owner['id'] if owner else None, 'status': status,
             'assigned_kind': kind, 'assigned_id': assigned_id, 'if_name': if_name,
             'mac': mac, 'is_primary': 1 if data.get('is_primary') else 0,
+            'is_reservation': 1 if data.get('is_reservation') else 0,
             'dns_name': dns_name, 'description': desc}, None
 
 

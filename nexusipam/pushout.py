@@ -164,19 +164,19 @@ def build_dhcp():
         for o in by_net.get(nid, []):
             options.append({'tag': tag, 'option': o['option'], 'value': o['value']})
 
-    # A reservation is an address HELD for a machine, which is what `reserved`
-    # means here — not merely an address we happen to know a MAC for.
-    #
-    # That distinction is load-bearing: a hypervisor import records a MAC for
-    # every VM it finds, and those machines are statically configured and
-    # never ask for a lease. Pushing them would fabricate a reservation per VM
-    # on the DHCP server for addresses nobody is leasing. (The older
-    # /api/export/dnsmasq/static-leases endpoint still uses the looser rule;
-    # it is pull-only, so nothing acts on it unasked.)
+    # Only addresses explicitly marked as DHCP reservations. "Has a MAC" is
+    # far too loose — a hypervisor import records one for every VM it finds,
+    # and those machines are statically configured and never ask for a lease;
+    # publishing them would fabricate a reservation per VM for addresses
+    # nobody is leasing. `status = reserved` is too loose in the other
+    # direction and too tight in practice: a live host with a fixed lease is
+    # legitimately `active`, so keying off status silently drops it.
+    # (The older /api/export/dnsmasq/static-leases endpoint keeps the loose
+    # rule; it is pull-only, so nothing acts on it unasked.)
     leases = []
     for rec in db.query(
             "SELECT address, dns_name, mac FROM ip_addresses "
-            "WHERE mac <> '' AND version = 4 AND status = 'reserved' "
+            "WHERE mac <> '' AND version = 4 AND is_reservation = 1 "
             "ORDER BY addr_hex"):
         leases.append({'mac': rec['mac'], 'ip': rec['address'],
                        'hostname': rec['dns_name'].split('.')[0] if rec['dns_name'] else ''})

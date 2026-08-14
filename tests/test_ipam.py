@@ -1422,7 +1422,7 @@ def test_build_dhcp_carries_extra_options_and_reservations(client):
                                            'value': 'netboot.xyz.kpxe',
                                            'enabled': False})
     _mk_addr(client, '10.82.0.9', mac='aa:bb:cc:dd:ee:01', dns_name='pxe.lab.lan',
-             status='reserved')
+             status='reserved', is_reservation=True)
     # A hypervisor import knows this VM's MAC, but the machine is statically
     # configured and never asks for a lease — pushing it would fabricate a
     # reservation on the DHCP server for an address nobody leases.
@@ -1434,6 +1434,46 @@ def test_build_dhcp_carries_extra_options_and_reservations(client):
     assert '67' not in opts                      # disabled options are not sent
     assert out['static_leases'] == [
         {'mac': 'aa:bb:cc:dd:ee:01', 'ip': '10.82.0.9', 'hostname': 'pxe'}]
+
+
+def test_a_live_host_can_also_be_a_dhcp_reservation(client):
+    """The case that made this a column rather than a status: a machine in
+    daily use, with a fixed lease. Keying off status='reserved' drops it,
+    because someone will quite reasonably mark it active."""
+    from nexusipam import pushout
+    _scope(client, '10.87.0.0/24', '10.87.0.100', '10.87.0.200', name='n',
+           gateway='10.87.0.1')
+    _mk_addr(client, '10.87.0.9', mac='aa:bb:cc:00:87:01', dns_name='nas.lab.lan',
+             status='active', is_reservation=True)
+    _mk_addr(client, '10.87.0.8', mac='aa:bb:cc:00:87:02', status='reserved')
+    leases = pushout.build_dhcp()['static_leases']
+    assert [l['ip'] for l in leases] == ['10.87.0.9']
+
+
+def test_reservation_flag_survives_an_unrelated_edit(client):
+    """Partial updates layer the stored row under the body, so an edit that
+    does not mention the flag must not clear it — this is the bug class that
+    bit three times before updates were centralised."""
+    from nexusipam import pushout
+    _scope(client, '10.88.0.0/24', '10.88.0.100', '10.88.0.200', name='n',
+           gateway='10.88.0.1')
+    rid = _mk_addr(client, '10.88.0.9', mac='aa:bb:cc:00:88:01',
+                   status='active', is_reservation=True)
+    assert client.post('/api/addresses/%d' % rid,
+                       json={'description': 'moved rack'}).status_code == 200
+    assert [l['ip'] for l in pushout.build_dhcp()['static_leases']] == ['10.88.0.9']
+
+
+def test_v5_database_seeds_the_reservation_flag_from_what_it_replaced(client):
+    """An upgrade must publish exactly what it published before."""
+    from nexusipam.core import db
+    _mk_addr(client, '10.89.0.9', mac='aa:bb:cc:00:89:01', status='reserved')
+    _mk_addr(client, '10.89.0.8', mac='aa:bb:cc:00:89:02', status='active')
+    db.execute('UPDATE ip_addresses SET is_reservation=0')      # pretend v5
+    db._migrate_reservations(db.connect())
+    flags = {r['address']: r['is_reservation'] for r in
+             db.query('SELECT address, is_reservation FROM ip_addresses')}
+    assert flags == {'10.89.0.9': 1, '10.89.0.8': 0}
 
 
 def test_build_dhcp_keeps_a_disabled_scope_but_marks_it_disabled(client):

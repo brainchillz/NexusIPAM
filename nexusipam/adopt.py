@@ -118,10 +118,16 @@ def _adopt_reservation(res, source, out):
     addr_hex = netutil.hexify(int(ip))
     existing = db.query_one('SELECT * FROM ip_addresses WHERE address=?', (str(ip),))
     if existing:
-        # Merge the MAC in if we do not have one; never touch a name or an
-        # assignment that DNS or a hypervisor import already established.
+        # Merge in what we learned; never touch a name or an assignment that
+        # DNS or a hypervisor import already established. `is_reservation` is
+        # always asserted — the gateway is the authority on whether it hands
+        # this address to this MAC, and an address adopted first by another
+        # importer would otherwise never be published back as a reservation.
+        patch = {'is_reservation': 1}
         if not existing['mac'] and res.get('mac'):
-            db.update('ip_addresses', existing['id'], {'mac': res['mac']})
+            patch['mac'] = res['mac']
+        if patch.keys() - {'is_reservation'} or not existing['is_reservation']:
+            db.update('ip_addresses', existing['id'], patch)
             out['reservations_updated'].append(str(ip))
         else:
             out['reservations_kept'].append(str(ip))
@@ -130,7 +136,7 @@ def _adopt_reservation(res, source, out):
     db.insert('ip_addresses', {
         'address': str(ip), 'version': ip.version, 'addr_hex': addr_hex,
         'network_id': owner['id'] if owner else None,
-        'status': 'reserved', 'mac': res.get('mac') or '',
+        'status': 'reserved', 'mac': res.get('mac') or '', 'is_reservation': 1,
         'dns_name': '', 'description': 'DHCP reservation adopted from the gateway',
         'source': source, 'ext_id': res.get('ext_id') or '', 'meta': '{}'})
     out['reservations_created'].append(str(ip))
