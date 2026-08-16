@@ -458,7 +458,31 @@ function searchBar() {
 }
 
 // ─── Authentication ─────────────────────────────────────
+
+// ─── Single sign-on (only rendered where this node is enrolled) ────────
+// Purely additive: the password box is always present, so an issuer outage
+// never locks this node out of its own UI.
+let ssoConfig = null;
+
+function ssoSignIn() {
+  const next = location.pathname + location.search + location.hash;
+  location.href = ssoConfig.issuer + '/sso/authorize?aud='
+    + encodeURIComponent(ssoConfig.audience) + '&next=' + encodeURIComponent(next);
+}
+
+function renderSsoButton() {
+  const form = document.querySelector('#login-screen form') || document.getElementById('login-screen');
+  if (!ssoConfig || !form || document.getElementById('sso-btn')) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'sso-block';
+  wrap.innerHTML = '<div class="sso-sep"><span>or</span></div>'
+    + '<button type="button" id="sso-btn" class="btn sso-btn">Sign in with Nexus SSO</button>';
+  form.appendChild(wrap);
+  document.getElementById('sso-btn').addEventListener('click', ssoSignIn);
+}
+
 function showLogin() {
+  renderSsoButton();
   isAuthed = false;
   document.querySelector('.sidebar').style.display = 'none';
   document.querySelector('.content').style.display = 'none';
@@ -551,8 +575,11 @@ async function doChangePassword(forced) {
 async function checkAuth() {
   try {
     const r = await fetch('/api/me');
+    // `sso` is present only where this node is enrolled, and rides on the 401
+    // too so the login screen can offer it before anyone is authenticated.
+    const j = await r.json().catch(() => ({}));
+    ssoConfig = j.sso || null;
     if (!r.ok) { showLogin(); return; }
-    const j = await r.json();
     showApp(j.user, j.fqdn, j.role, j.must_change, j.banner);
   } catch (err) { showLogin(); }
 }

@@ -31,6 +31,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 from . import db
 from .config import DATA_DIR, APP_VERSION, write_json_atomic
+from . import sso
 from .runcmd import err
 
 bp = Blueprint('auth', __name__)
@@ -50,7 +51,7 @@ LOCKOUT_WINDOW = 300  # seconds
 
 # Endpoints reachable without a session (BARE endpoint names — the blueprint
 # prefix is stripped before comparison).
-PUBLIC_ENDPOINTS = {'api_login', 'api_me', 'api_version', 'index', 'static'}
+PUBLIC_ENDPOINTS = {'api_login', 'api_me', 'api_version', 'index', 'static', 'sso_callback'}
 
 # Mutating endpoints a non-admin (read-only) account is still allowed to call.
 RBAC_EXEMPT = {'api_logout', 'change_password'}
@@ -260,13 +261,114 @@ def api_me():
     # (require_login, which sets g.identity_*, is skipped for public endpoints).
     name, role = _resolve_identity()
     if not name:
-        return jsonify({'authenticated': False}), 401
+        # The login screen needs to know whether to offer SSO before anyone is
+        # authenticated, so the hint rides on the 401 too.
+        body = {'authenticated': False}
+        if sso.enabled():
+            body['sso'] = sso.login_hint()
+        return jsonify(body), 401
     rec = _users().get(name) if not str(name).startswith('token:') else None
-    return jsonify({'authenticated': True, 'user': name, 'role': role,
+    body = {'authenticated': True, 'user': name, 'role': role,
                     'must_change': bool(isinstance(rec, dict) and rec.get('must_change')),
                     'fqdn': socket.getfqdn(),
                     'banner': db.get_setting('banner'),
-                    'version': APP_VERSION})
+                    'version': APP_VERSION}
+    # Added ONLY when configured, so an unconfigured node's response is
+    # unchanged from one built before SSO existed.
+    if sso.enabled():
+        body['sso'] = sso.login_hint()
+    return jsonify(body)
+
+
+@bp.route('/api/sso')
+def sso_status():
+    """What this node's SSO configuration is, and whether the UI may change it."""
+    cfg = sso.config()
+    return jsonify({'success': True, 'configured': bool(cfg),
+                    'locked': sso.locked(),
+                    'source': (cfg or {}).get('source'),
+                    'issuer': (cfg or {}).get('issuer', ''),
+                    'audience': (cfg or {}).get('audience', ''),
+                    'kid': (cfg or {}).get('kid', '')})
+
+
+@bp.route('/api/sso/enroll', methods=['POST'])
+def sso_enroll():
+    """Redeem a one-time enrollment code at an issuer and store the result.
+
+    Requires admin here AND a code minted by an admin at the issuer — neither
+    side can enroll the other unilaterally. Refused when the host configuration
+    already fixes this (env vars win), so a UI admin can never silently
+    override what the installer decided.
+    """
+    if sso.locked():
+        return jsonify({'success': False,
+                        'error': "Single sign-on is fixed by this host's "
+                                 'configuration and cannot be changed here'}), 409
+    data = request.get_json(silent=True) or {}
+    issuer = str(data.get('issuer') or '').strip().rstrip('/')
+    code = str(data.get('code') or '').strip()
+    if not issuer.startswith(('http://', 'https://')):
+        return jsonify({'success': False,
+                        'error': 'Issuer must be an http:// or https:// URL'}), 400
+    if not code:
+        return jsonify({'success': False, 'error': 'Enrollment code is required'}), 400
+    result, e = sso.redeem(issuer, code)
+    if e:
+        return jsonify({'success': False, 'error': e}), 400
+    sso.save_stored(result['issuer'], result['key'], result.get('kid', ''),
+                    result['audience'])
+    return jsonify({'success': True, 'issuer': result['issuer'],
+                    'audience': result['audience'], 'kid': result.get('kid', '')})
+
+
+@bp.route('/api/sso', methods=['DELETE'])
+def sso_disable():
+    """Remove a UI-enrolled configuration. The current password is required —
+    turning off the way you sign in should not be a single click, and it stops
+    a hijacked session quietly detaching this node from the issuer."""
+    if sso.locked():
+        return jsonify({'success': False,
+                        'error': "Single sign-on is fixed by this host's "
+                                 'configuration and cannot be changed here'}), 409
+    data = request.get_json(silent=True) or {}
+    name = getattr(g, 'identity_name', '')
+    rec = _users().get(name)
+    if not rec or not check_password_hash(_user_hash(rec), data.get('password') or ''):
+        return jsonify({'success': False, 'error': 'Current password is incorrect'}), 403
+    sso.clear_stored()
+    return jsonify({'success': True})
+
+
+def sso_callback():
+    """Exchange a signed SSO assertion for an ordinary local session.
+
+    The ONLY place an assertion is accepted. Everything downstream — the
+    require_login guard, RBAC, audit — sees a normal session and cannot tell
+    how it was created, which is the point.
+
+    Registered unconditionally so a UI enrollment applies without a restart;
+    unconfigured it behaves as though it were not here.
+    """
+    from flask import redirect
+    if not sso.enabled():
+        return jsonify({'success': False, 'error': 'Not found'}), 404
+    sub = sso.verify(request.args.get('a'))
+    dest = sso.safe_next(request.args.get('next'))
+    if not sub:
+        return redirect('/?sso_error=1', code=302)
+    # The account must already exist here. An assertion proves WHO the caller
+    # is, never authority to create them or to choose their role.
+    if _users().get(sub) is None:
+        return redirect('/?sso_error=unknown_user', code=302)
+    session.clear()          # session fixation: never reuse a pre-login id
+    session['user'] = sub
+    session.permanent = True
+    g.audit_user = sub
+    return redirect(dest, code=302)
+
+
+bp.add_url_rule('/sso/callback', 'sso_callback', sso_callback)
 
 
 @bp.route('/api/version')

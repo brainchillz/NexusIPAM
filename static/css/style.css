@@ -652,3 +652,14 @@ html.theme-light .search-hit:hover { background: rgba(0,0,0,0.04); }
 .row-actions .btn { margin-left: 4px; }
 .muted { color: var(--text-muted); }
 .nowrap { white-space: nowrap; }
+
+/* ─── Single sign-on (only rendered where this node is enrolled) ─────── */
+.sso-block { margin-top: 14px; }
+.sso-sep { display: flex; align-items: center; gap: 10px;
+  color: var(--text-muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 12px; }
+.sso-sep::before, .sso-sep::after { content: ''; flex: 1;
+  border-top: 1px solid var(--border); }
+.btn.sso-btn { width: 100%; background: transparent; color: var(--text);
+  border: 1px solid var(--border); }
+.btn.sso-btn:hover { border-color: var(--primary); color: var(--primary); }
