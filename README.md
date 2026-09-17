@@ -735,7 +735,10 @@ read.
 the current content, a drift check says whether it still *holds* it. The
 gateway is read back and diffed with the same planners the push executes —
 computed writes, performed nowhere — because its UI stays editable after a
-push. A DNSMAQ-MGR node needs no check: its pushed sections are locked.
+push. A DNSMAQ-MGR node is checked differently: with its read-only API token
+on file, IPAM reads the node's own mirror status back and confirms each
+section is still locked to this IPAM at the serial it acked — which is what
+catches a detach, rollback or restore on the node.
 
 ### VC-Deployer
 

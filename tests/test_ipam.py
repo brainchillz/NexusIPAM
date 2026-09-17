@@ -2677,8 +2677,9 @@ def test_drift_route_stores_the_verdict_and_refuses_dnsmaq(client, monkeypatch):
     from nexusipam import pushout
     client.post('/api/push/targets',
                 json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x'})
+    # A node WITHOUT a read token cannot be read back — say so, do not guess.
     r = client.post('/api/push/targets/ns1/drift')
-    assert r.status_code == 400 and 'locks' in r.json['error']
+    assert r.status_code == 400 and 'read token' in r.json['error']
 
     client.post('/api/push/targets',
                 json={'name': 'gw', 'kind': 'unifi', 'url': 'https://gw',
@@ -3033,3 +3034,43 @@ def test_provision_bad_alias_rolls_back_allocation(client, monkeypatch):
     assert r3.json['action'] == 'deprecated'
     look = client.get('/api/addresses/lookup?address=%s' % r2.json['address']).json
     assert look['record']['status'] == 'deprecated' and look['record']['dns_name'] == ''
+
+
+def test_dnsmaq_drift_reads_mirror_status_back():
+    """A node's locks stop edits, but a detach, rollback or restore leaves it
+    holding something other than what it acked — and the serial column would
+    still read green. The node's own mirror status is the truth."""
+    from nexusipam import pushout
+    target = {'name': 'ns1', 'kind': 'dnsmaq', 'url': 'https://ns1:8443',
+              'read_token': 'dm_x', 'sections': ['hosts', 'dhcp'],
+              'serials': {'hosts': 39, 'dhcp': 22}}
+    in_sync = {'accept': True, 'locked': ['dhcp', 'hosts', 'netboot'],
+               'sources': {'nexus-ipam': {'serial': 39, 'sections': ['dhcp', 'hosts', 'netboot'],
+                                          'serials': {'hosts': 39, 'dhcp': 22, 'netboot': 1}}}}
+    r = pushout._drift_dnsmaq(target, status=in_sync)
+    assert r['ok'] and not r['sections']['hosts']['drifted'] and not r['sections']['dhcp']['drifted']
+
+    # detached on the node: the lock is gone
+    detached = {'accept': True, 'locked': [], 'sources': {}}
+    r = pushout._drift_dnsmaq(target, status=detached)
+    assert r['sections']['hosts']['drifted'] and r['sections']['hosts']['counts'] == {'unlocked': 1}
+
+    # restored from an older backup: lock present, serial behind ours
+    stale = {'accept': True, 'locked': ['dhcp', 'hosts'],
+             'sources': {'nexus-ipam': {'serial': 30, 'sections': ['dhcp', 'hosts'],
+                                        'serials': {'hosts': 30, 'dhcp': 22}}}}
+    r = pushout._drift_dnsmaq(target, status=stale)
+    assert r['sections']['hosts']['drifted'] and 'serial 30' in r['sections']['hosts']['examples'][0]
+    assert not r['sections']['dhcp']['drifted']
+
+    # legacy node sending only the scalar serial
+    legacy = {'accept': True, 'locked': ['hosts', 'dhcp'],
+              'sources': {'nexus-ipam': {'serial': 39, 'sections': ['hosts', 'dhcp']}}}
+    r = pushout._drift_dnsmaq(target, status=legacy)
+    assert not r['sections']['hosts']['drifted'] and r['sections']['dhcp']['drifted']
+
+    # run_drift dispatches to it, and a target without a read token raises
+    assert pushout.run_drift(target, client=in_sync)['ok']
+    import pytest as _pt
+    with _pt.raises(OSError):
+        pushout._drift_dnsmaq({'name': 'x', 'sections': ['hosts']})

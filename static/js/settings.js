@@ -104,8 +104,8 @@ async function page_settings() {
       {label: '', cls: 'row-actions', get: t => `
         <button class="btn btn-sm btn-outline" onclick="pushRunNow(this,'${jsArg(t.name)}')">Push</button>
         <button class="btn btn-sm btn-outline" onclick="pushTargetModal('${jsArg(t.name)}')">Edit</button>
-        ${t.kind !== 'dnsmaq' ? `<button class="btn btn-sm btn-outline"
-          title="Read this server back and diff it against the plan — read-only"
+        ${t.kind !== 'dnsmaq' || t.has_read_token ? `<button class="btn btn-sm btn-outline"
+          title="${t.kind !== 'dnsmaq' ? 'Read this server back and diff it against the plan — read-only' : 'Read the node\'s mirror status back: still locked to this IPAM, still at the serial we sent?'}"
           onclick="driftCheck('${jsArg(t.name)}', this)">Drift</button>` : ''}
         ${t.kind === 'unifi' || (t.kind === 'dnsmaq' && t.has_read_token) ? `<button class="btn btn-sm btn-outline"
           title="Read this server's networks, DHCP scopes, options and reservations into the plan"
@@ -445,14 +445,17 @@ function lastSerials(last) {
 }
 
 // Serials say whether a target ACKED the current content; drift says whether
-// it still HOLDS it. Only a gateway can drift — a DNSMAQ-MGR node locks its
-// pushed sections read-only, which is why its cell is a statement, not a check.
+// it still HOLDS it. A reconciled target (gateway, Pi-hole, Technitium) is
+// read back and diffed; a DNSMAQ-MGR node is asked for its mirror status —
+// its locks stop edits, but a detach, rollback or restore would not show up
+// in the serial column, and that is exactly what this cell catches.
 function driftCell(t) {
-  if (t.kind === 'dnsmaq') {
-    return '<span class="muted" title="Pushed sections lock read-only on the node, so its state cannot walk away">locked on node</span>';
-  }
   const d = t.drift;
-  if (!d) return '<span class="muted">unchecked</span>';
+  if (!d) {
+    return (t.kind || 'dnsmaq') === 'dnsmaq' && !t.has_read_token
+      ? '<span class="muted" title="Add the node\'s read-only API token to this target to check its mirror status">no read token</span>'
+      : '<span class="muted">unchecked</span>';
+  }
   if (!d.ok) {
     return `<span class="status-badge red" title="${escapeHtml(d.error || '')}">check failed</span>
       <span class="muted">${escapeHtml(fmtAgo(d.ts))}</span>`;
@@ -473,7 +476,7 @@ async function driftCheck(name, btn) {
     const r = await API.post('/api/push/targets/' + encodeURIComponent(name) + '/drift', {});
     const lines = Object.entries(r.drift.sections || {}).map(([s, v]) => v.drifted
       ? `${s}: DRIFTED — ${(v.examples || []).join('; ')}`
-      : `${s}: in sync (${v.in_step} setting(s) verified unchanged)`);
+      : `${s}: in sync${v.in_step > 1 ? ` (${v.in_step} setting(s) verified unchanged)` : ''}`);
     alert(`${name} read back:\n\n${lines.join('\n')}\n\nRead-only — nothing was written.`);
   } catch (e) { alert(e.message); }
   page_settings();

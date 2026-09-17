@@ -723,14 +723,53 @@ def push_target_delete(name):
 # planners the push executes — computed writes, performed nowhere.
 
 def run_drift(target, client=None):
-    """Read-only drift report for one reconciling target: for each subscribed
-    section, what a push right now would have to change. Raises on an
+    """Read-only drift report for one target: for each subscribed section,
+    what a push right now would have to change (reconciled kinds), or whether
+    the node still holds what it acked (DNSMAQ-MGR). Raises on an
     unreachable/refusing server; the route wraps that."""
+    if (target.get('kind') or 'dnsmaq') == 'dnsmaq':
+        return _drift_dnsmaq(target, client)
     if target.get('kind') == 'pihole':
         return _drift_pihole(target, client)
     if target.get('kind') == 'technitium':
         return _drift_technitium(target, client)
     return _drift_unifi(target, client)
+
+
+def _drift_dnsmaq(target, status=None):
+    """A DNSMAQ-MGR node cannot be EDITED under its locks, but it can be
+    detached, rolled back, restored from a backup or re-imaged — each leaves
+    it holding something other than what it acked, and (since 0.4.6) the node
+    refuses rollback/restore over a locked section precisely because this
+    IPAM would otherwise not notice: serials only advance on content change.
+    So read the node's own mirror status back (its read token) and check,
+    per subscribed section, that the lock still names us and the serial it
+    stores for us is the one we hold. `status` is injected by tests."""
+    report = {'ts': db.now(), 'ok': True, 'sections': {}}
+    if status is None:
+        if not target.get('read_token'):
+            raise OSError('no read token on this target (needed for /api/mirror/status)')
+        status = dnsmaq_get(target, '/api/mirror/status')
+    src = (status.get('sources') or {}).get(SOURCE_NAME) or {}
+    locked = set(src.get('sections') or [])
+    node_serials = src.get('serials') or {s: src.get('serial') for s in locked}
+    held = target.get('serials') or {}
+    for s in sections_for(target):
+        counts, examples = {}, []
+        if s not in locked:
+            counts['unlocked'] = 1
+            examples.append('%s is not locked to %s on the node (detached, restored, '
+                            'or never pushed)' % (s, SOURCE_NAME))
+        ns, hs = node_serials.get(s), held.get(s)
+        if hs is not None and ns is not None and int(ns) != int(hs):
+            counts['serial'] = 1
+            examples.append('node holds %s serial %s, this IPAM sent %s' % (s, ns, hs))
+        elif hs is not None and ns is None and s in locked:
+            counts['serial'] = 1
+            examples.append('node records no %s serial from us' % s)
+        report['sections'][s] = {'drifted': bool(counts), 'in_step': 0 if counts else 1,
+                                 'counts': counts, 'examples': examples}
+    return report
 
 
 def _drift_technitium(target, client=None):
@@ -910,11 +949,9 @@ def push_target_drift(name):
     target = next((t for t in targets if t['name'] == name), None)
     if not target:
         return err('No such target', 404)
-    if (target.get('kind') or 'dnsmaq') == 'dnsmaq':
-        return err('A DNSMAQ-MGR node locks every pushed section read-only, so '
-                   'it cannot drift — the serial column already answers "is it '
-                   'current?". Only a reconciled target, whose own UI stays '
-                   'editable, needs this check.', 400)
+    if (target.get('kind') or 'dnsmaq') == 'dnsmaq' and not target.get('read_token'):
+        return err('This node has no read token on file; add one (Settings → API '
+                   'tokens on the node, role read-only) to read its mirror status back.', 400)
     try:
         report = run_drift(target)
     except Exception as e:                    # unreachable, login refused, …
