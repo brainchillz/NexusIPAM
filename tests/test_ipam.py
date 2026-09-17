@@ -3074,3 +3074,28 @@ def test_dnsmaq_drift_reads_mirror_status_back():
     import pytest as _pt
     with _pt.raises(OSError):
         pushout._drift_dnsmaq({'name': 'x', 'sections': ['hosts']})
+
+
+def test_push_to_a_dnsmaq_node_reads_its_status_back(client, monkeypatch):
+    """After a successful push the Drift column should already say whether the
+    node holds what it acked — one GET, no button."""
+    from nexusipam import pushout
+    _mk_addr(client, '10.72.0.9', dns_name='auto.example.net')
+    client.post('/api/push/targets',
+                json={'name': 'ns1', 'url': 'https://ns1:8443', 'token': 'dmm_x',
+                      'read_token': 'dm_r'})
+    monkeypatch.setattr(pushout, 'push_target', lambda t, d, s: (True, 'applied via none'))
+    seen = []
+    monkeypatch.setattr(pushout, 'run_drift', lambda t, client=None: (seen.append(t['name']),
+                        {'ts': 1, 'ok': True, 'sections': {'hosts': {'drifted': False, 'in_step': 1,
+                                                                     'counts': {}, 'examples': []}}})[1])
+    r = client.post('/api/push/run')
+    assert r.status_code == 200 and seen == ['ns1']
+    ns1 = next(t for t in client.get('/api/push').json['targets'] if t['name'] == 'ns1')
+    assert ns1['drift']['ok'] and not ns1['drift']['sections']['hosts']['drifted']
+    # a node without a read token is pushed but not checked
+    client.post('/api/push/targets',
+                json={'name': 'ns2', 'url': 'https://ns2:8443', 'token': 'dmm_y'})
+    seen.clear()
+    client.post('/api/push/run')
+    assert seen == ['ns1']

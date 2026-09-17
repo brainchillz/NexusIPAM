@@ -1034,6 +1034,14 @@ def run_push(only='', sections=None):
             held.update({s: serials[s] for s in subs})
             t['serials'] = held
             t['serial'] = max(held.values())
+            if (t.get('kind') or 'dnsmaq') == 'dnsmaq' and t.get('read_token'):
+                # A node's drift check is one GET of its mirror status, so
+                # take it on the spot: the Drift column then confirms the
+                # node holds what it just acked, with no button to press.
+                try:
+                    t['drift'] = run_drift(t)
+                except Exception as e:
+                    t['drift'] = {'ts': db.now(), 'ok': False, 'error': str(e)}
         results.append({'name': t['name'], 'ok': ok, 'detail': detail,
                         'sections': subs})
     counts = {s: section_size(data[s]) for s in live}
